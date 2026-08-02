@@ -1,6 +1,8 @@
 """Tests for the Screen Recording permission gate. Quartz is injected via
 sys.modules so we exercise granted / denied / import-fail without real TCC."""
 import os
+
+import pytest
 import sys
 import types
 
@@ -8,6 +10,18 @@ import anthropic
 import httpx
 
 import app
+
+
+@pytest.fixture(autouse=True)
+def isolate_prefs(monkeypatch):
+    """Keep tests off the developer's real prefs.json.
+
+    Several tests stub only one of analyze_image/translate_image; whichever the
+    live `quick_mode` preference happens to select then decides whether they
+    pass. Default every test to a clean slate — tests that care about a mode
+    override this themselves.
+    """
+    monkeypatch.setattr(app, "_load_prefs", lambda: {})
 
 
 def _fake_quartz(preflight, calls):
@@ -53,7 +67,7 @@ def test_prompt_for_api_key_saves_on_ok(monkeypatch):
     monkeypatch.setattr(app.keychain, "set_key", lambda v: saved.append(v))
     # Patch the dialog seam, not the UI toolkit: _ask_for_key() runs a real
     # NSAlert, which in a test run would block forever waiting to be clicked.
-    monkeypatch.setattr(app, "_ask_for_key", lambda: "sk-typed-in")
+    monkeypatch.setattr(app, "_ask_for_key", lambda existing=False: "sk-typed-in")
 
     app._prompt_for_api_key()
 
@@ -66,7 +80,7 @@ def test_prompt_for_api_key_cancelled_does_nothing(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     saved = []
     monkeypatch.setattr(app.keychain, "set_key", lambda v: saved.append(v))
-    monkeypatch.setattr(app, "_ask_for_key", lambda: None)  # cancelled
+    monkeypatch.setattr(app, "_ask_for_key", lambda existing=False: None)  # cancelled
 
     app._prompt_for_api_key()
 
@@ -80,7 +94,7 @@ def test_prompt_for_api_key_ignores_blank_input(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     saved = []
     monkeypatch.setattr(app.keychain, "set_key", lambda v: saved.append(v))
-    monkeypatch.setattr(app, "_ask_for_key", lambda: "")
+    monkeypatch.setattr(app, "_ask_for_key", lambda existing=False: "")
 
     app._prompt_for_api_key()
 
@@ -95,7 +109,7 @@ def test_prompt_for_api_key_survives_a_broken_dialog(monkeypatch):
     saved = []
     monkeypatch.setattr(app.keychain, "set_key", lambda v: saved.append(v))
 
-    def _boom():
+    def _boom(existing=False):
         raise RuntimeError("NSAlert exploded")
 
     monkeypatch.setattr(app, "_ask_for_key", _boom)
@@ -115,7 +129,7 @@ def test_prompt_for_api_key_keychain_write_failure_shows_error(monkeypatch):
     monkeypatch.setattr(app.keychain, "set_key", _boom)
     shown = []
     monkeypatch.setattr(app, "_show_error", lambda *a: shown.append(a))
-    monkeypatch.setattr(app, "_ask_for_key", lambda: "sk-typed-in")
+    monkeypatch.setattr(app, "_ask_for_key", lambda existing=False: "sk-typed-in")
 
     app._prompt_for_api_key()
 

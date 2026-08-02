@@ -347,6 +347,7 @@ class ScreenCoach(rumps.App):
             ball_item,
             login_item,
             None,
+            rumps.MenuItem("Set API Key…", callback=lambda _: _set_api_key()),
             rumps.MenuItem("Quit", callback=self._quit),
         ]
 
@@ -421,6 +422,7 @@ class ScreenCoach(rumps.App):
             checked=bool(login.state) if login is not None else False,
             enabled=getattr(sys, "frozen", False))
         menu.addItem_(NSMenuItem.separatorItem())
+        add("Set API Key…", _set_api_key)
         add("Quit", lambda: self._quit(None))
         return menu
 
@@ -567,13 +569,40 @@ def _start_hotkey() -> None:
     _debug_log(f"CGEventTap installed on main run loop: {tap!r}")
 
 
-def _ask_for_key() -> str | None:
+def _build_edit_menu():
+    """A main menu carrying only Cut/Copy/Paste/Select All.
+
+    Text fields don't implement ⌘V themselves — AppKit dispatches it through the
+    main menu's key equivalents. An LSUIElement app has no main menu, so pasting
+    into a dialog it shows does nothing at all, which is what made the API key
+    impossible to paste. This is installed only while a dialog is up and removed
+    afterwards, so the app doesn't otherwise occupy the system menu bar.
+    """
+    from AppKit import NSMenu, NSMenuItem
+
+    main = NSMenu.alloc().init()
+    edit_item = NSMenuItem.alloc().init()
+    main.addItem_(edit_item)
+    edit = NSMenu.alloc().initWithTitle_("Edit")
+    for title, selector, key in (
+        ("Cut", "cut:", "x"),
+        ("Copy", "copy:", "c"),
+        ("Paste", "paste:", "v"),
+        ("Select All", "selectAll:", "a"),
+    ):
+        edit.addItem_(
+            NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, selector, key)
+        )
+    edit_item.setSubmenu_(edit)
+    return main
+
+
+def _ask_for_key(existing: str | None = None) -> str | None:
     """Show a secure text prompt and return what was typed, or None if cancelled.
 
     Built directly on NSAlert rather than rumps.Window: in this LSUIElement app
     rumps.Window repeatedly blocked in runModal on a dialog that never appeared
-    on screen, leaving no way to enter the key at all. NSAlert with an accessory
-    NSSecureTextField renders reliably once the app is activated.
+    on screen, leaving no way to enter the key at all.
     """
     from AppKit import (
         NSAlert,
@@ -585,6 +614,8 @@ def _ask_for_key() -> str | None:
     from Foundation import NSMakeRect
 
     app = NSApplication.sharedApplication()
+    prev_menu = app.mainMenu()
+    app.setMainMenu_(_build_edit_menu())
     # Become a regular app for the duration of the dialog. An accessory app has
     # no window layer for a modal to attach to, which is what kept the prompt
     # invisible; the policy is restored in the finally below so no Dock icon
@@ -593,27 +624,45 @@ def _ask_for_key() -> str | None:
     app.activateIgnoringOtherApps_(True)
     try:
         alert = NSAlert.alloc().init()
-        alert.setMessageText_("设置 Screen Coach")
+        alert.setMessageText_("设置 Anthropic API key")
         alert.setInformativeText_(
-            "首次使用需要 Anthropic API key，会存入 macOS Keychain，之后不用再输入。"
+            "key 存入 macOS Keychain，不写进文件。可用 ⌘V 粘贴。\n"
+            + ("当前已存有一个 key，保存会覆盖它。" if existing else
+               "还没有设置过 key。")
         )
         alert.addButtonWithTitle_("保存")
         alert.addButtonWithTitle_("取消")
         field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 24))
         field.setPlaceholderString_("sk-ant-…")
         alert.setAccessoryView_(field)
-        alert.window().setInitialFirstResponder_(field)
+        window = alert.window()
+        window.setInitialFirstResponder_(field)
+        # Without this the field can render focused yet not receive keystrokes,
+        # since a modal shown by a just-promoted accessory app doesn't always
+        # win key-window status on its own.
+        window.makeFirstResponder_(field)
         clicked = alert.runModal()
         if clicked != 1000:  # NSAlertFirstButtonReturn
             return None
         return (field.stringValue() or "").strip() or None
     finally:
         app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        app.setMainMenu_(prev_menu)  # give the system menu bar back
 
 
-def _prompt_for_api_key() -> None:
+def _set_api_key() -> None:
+    """Menu entry point: set or replace the stored key at any time.
+
+    Separate from the startup prompt because a key can be wrong, revoked, or
+    simply never entered — without this the only way to fix one was to delete
+    the Keychain item by hand and relaunch.
+    """
+    _prompt_for_api_key(existing=bool(os.environ.get("ANTHROPIC_API_KEY")))
+
+
+def _prompt_for_api_key(existing: bool = False) -> None:
     try:
-        key = _ask_for_key()
+        key = _ask_for_key(existing=existing)
     except Exception:  # noqa: BLE001 - a broken dialog must not kill the app
         traceback.print_exc()
         _debug_log(f"API key prompt failed: {traceback.format_exc()}")
