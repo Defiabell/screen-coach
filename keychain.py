@@ -7,11 +7,13 @@ from __future__ import annotations
 import threading
 
 from Security import (
+    SecAccessCreate,
     SecItemAdd,
     SecItemCopyMatching,
     SecItemDelete,
     SecItemUpdate,
     errSecDuplicateItem,
+    kSecAttrAccess,
     kSecAttrAccount,
     kSecAttrService,
     kSecClass,
@@ -24,6 +26,28 @@ from Security import (
 
 SERVICE = "com.jinkun.screen-coach"
 ACCOUNT = "ANTHROPIC_API_KEY"
+
+
+def _open_access():
+    """An ACL that lets any application read the item without prompting.
+
+    This is the fix for the key having to be re-entered after every rebuild.
+    By default SecItemAdd binds the item's ACL to the *signature of the process
+    that created it*, so a rebuilt bundle counted as a different application:
+    securityd would block waiting on an authorization dialog, and an LSUIElement
+    app has no way to show one — the app hung on launch until the item was
+    deleted and typed in again.
+
+    An empty trusted-application list means "no application is challenged",
+    which is what removes the prompt. Returns None if the ACL can't be created,
+    in which case the caller falls back to the default (prompting) behaviour
+    rather than failing to store the key at all.
+    """
+    try:
+        status, access = SecAccessCreate(SERVICE, None, None)
+    except Exception:  # noqa: BLE001 - fall back to default ACL
+        return None
+    return access if status == 0 else None
 
 
 def _query() -> dict:
@@ -53,7 +77,11 @@ def _write(value: str) -> None:
     # actually is one; SecItemAdd would then fail with the unrecoverable
     # errSecDuplicateItem (-25299) and no UI path out.
     data = value.encode("utf-8")
-    status, _item = SecItemAdd({**_query(), kSecValueData: data}, None)
+    attrs = {**_query(), kSecValueData: data}
+    access = _open_access()
+    if access is not None:
+        attrs[kSecAttrAccess] = access
+    status, _item = SecItemAdd(attrs, None)
     if status == errSecDuplicateItem:  # already there — overwrite
         status = SecItemUpdate(_query(), {kSecValueData: data})
     if status != 0:

@@ -5,10 +5,16 @@ from pathlib import Path
 
 import keychain
 
-MODEL = "claude-sonnet-5"          # vision-capable; supports analyzer.py's effort parameter
-                                   # (opus-4-1 does not — it 400s with "does not support the
-                                   # effort parameter"). Official-API id, not a gateway alias.
+MODEL = "claude-sonnet-5"          # vision-capable; official-API id, not a gateway alias
 MAX_TOKENS = 4096                  # headroom so a dense breakdown's JSON isn't truncated
+
+# Quick mode: translation only, no breakdown. Measured on the same sentence and
+# image — full breakdown 7.0-8.0s / 493 output tokens, translation-only 1.3-1.7s
+# / 31. The latency is dominated by tokens generated, not by reading the image,
+# so dropping the breakdown is what makes it fast; the smaller model is then
+# free, since translating a sentence needs no reasoning headroom.
+QUICK_MODEL = "claude-haiku-4-5-20251001"
+QUICK_MAX_TOKENS = 1024
 def _history_path() -> Path:
     """Per-user history file, outside the .app bundle.
 

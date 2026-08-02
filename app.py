@@ -124,7 +124,8 @@ def _run_analysis(grab=None) -> None:
                 os.unlink(png)  # don't leave screenshots around
             except OSError:
                 pass
-        analysis = analyzer.analyze_image(_get_client(), b64)
+        run = analyzer.translate_image if _quick_mode_pref() else analyzer.analyze_image
+        analysis = run(_get_client(), b64)
         analysis["ts"] = datetime.now().isoformat(timespec="seconds")
         history.append_entry(config.HISTORY_PATH, analysis)
         _show(render.render_html(analysis, history.load_recent(config.HISTORY_PATH)))
@@ -205,6 +206,15 @@ def _use_region_pref() -> bool:
     """
     prefs = _load_prefs()
     return bool(prefs.get("use_region", prefs.get("region_frame", True)))
+
+
+def _quick_mode_pref() -> bool:
+    """Whether to translate only, skipping the breakdown.
+
+    Read per analysis rather than cached, so flipping the menu item applies to
+    the next trigger without a restart.
+    """
+    return bool(_load_prefs().get("quick_mode", False))
 
 
 def _ball_click() -> None:
@@ -324,10 +334,14 @@ class ScreenCoach(rumps.App):
         if ball_on:
             floatball.show(_ball_click, menu_builder=self._build_ball_menu)
 
+        quick_item = rumps.MenuItem("Quick Translate", callback=self._on_toggle_quick)
+        quick_item.state = _quick_mode_pref()
+
         self.menu = [
             rumps.MenuItem("Analyze Selection", callback=lambda _: _trigger()),
             rumps.MenuItem("Analyze Region", callback=lambda _: _trigger_region()),
             None,
+            quick_item,
             region_item,
             rumps.MenuItem("Adjust Region…", callback=lambda _: region.enter_edit_mode()),
             ball_item,
@@ -346,6 +360,10 @@ class ScreenCoach(rumps.App):
         else:
             floatball.hide()
         _save_pref("float_ball", bool(sender.state))
+
+    def _on_toggle_quick(self, sender):
+        sender.state = not sender.state
+        _save_pref("quick_mode", bool(sender.state))
 
     def _on_toggle_region(self, sender):
         sender.state = not sender.state
@@ -386,6 +404,8 @@ class ScreenCoach(rumps.App):
         add("Analyze Selection", _trigger)
         add("Analyze Region", _trigger_region)
         menu.addItem_(NSMenuItem.separatorItem())
+        add("Quick Translate", self._toggle_quick_from_ball,
+            checked=_quick_mode_pref())
         add("Use Region", self._toggle_region_from_ball,
             checked=_use_region_pref())
         add("Adjust Region…", region.enter_edit_mode)
@@ -411,6 +431,11 @@ class ScreenCoach(rumps.App):
             return self.menu[title]
         except KeyError:
             return None
+
+    def _toggle_quick_from_ball(self):
+        item = self._menu_item("Quick Translate")
+        if item is not None:
+            self._on_toggle_quick(item)
 
     def _toggle_region_from_ball(self):
         item = self._menu_item("Use Region")
@@ -542,27 +567,59 @@ def _start_hotkey() -> None:
     _debug_log(f"CGEventTap installed on main run loop: {tap!r}")
 
 
-def _prompt_for_api_key() -> None:
-    # Activate first. LSUIElement apps start unactivated with no window layer for
-    # a modal to attach to, and rumps.Window then blocks in runModal on a dialog
-    # that never renders — an invisible hang at the very first line of main(),
-    # before the menu bar exists. Observed repeatedly on this app.
-    try:
-        from AppKit import NSApplication
+def _ask_for_key() -> str | None:
+    """Show a secure text prompt and return what was typed, or None if cancelled.
 
-        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-    except Exception:  # noqa: BLE001 - if activation fails, still try the dialog
+    Built directly on NSAlert rather than rumps.Window: in this LSUIElement app
+    rumps.Window repeatedly blocked in runModal on a dialog that never appeared
+    on screen, leaving no way to enter the key at all. NSAlert with an accessory
+    NSSecureTextField renders reliably once the app is activated.
+    """
+    from AppKit import (
+        NSAlert,
+        NSApplication,
+        NSApplicationActivationPolicyAccessory,
+        NSApplicationActivationPolicyRegular,
+        NSSecureTextField,
+    )
+    from Foundation import NSMakeRect
+
+    app = NSApplication.sharedApplication()
+    # Become a regular app for the duration of the dialog. An accessory app has
+    # no window layer for a modal to attach to, which is what kept the prompt
+    # invisible; the policy is restored in the finally below so no Dock icon
+    # lingers afterwards.
+    app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+    app.activateIgnoringOtherApps_(True)
+    try:
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("设置 Screen Coach")
+        alert.setInformativeText_(
+            "首次使用需要 Anthropic API key，会存入 macOS Keychain，之后不用再输入。"
+        )
+        alert.addButtonWithTitle_("保存")
+        alert.addButtonWithTitle_("取消")
+        field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 24))
+        field.setPlaceholderString_("sk-ant-…")
+        alert.setAccessoryView_(field)
+        alert.window().setInitialFirstResponder_(field)
+        clicked = alert.runModal()
+        if clicked != 1000:  # NSAlertFirstButtonReturn
+            return None
+        return (field.stringValue() or "").strip() or None
+    finally:
+        app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+
+
+def _prompt_for_api_key() -> None:
+    try:
+        key = _ask_for_key()
+    except Exception:  # noqa: BLE001 - a broken dialog must not kill the app
         traceback.print_exc()
-    response = rumps.Window(
-        message="首次使用需要 Anthropic API key，会存入 macOS Keychain，之后不用再输入。",
-        title="设置 Screen Coach",
-        secure=True,
-        ok="保存",
-        cancel="取消",
-    ).run()
-    if not (response.clicked == 1 and response.text.strip()):
+        _debug_log(f"API key prompt failed: {traceback.format_exc()}")
         return
-    key = response.text.strip()
+    if not key:
+        return
     try:
         keychain.set_key(key)
     except Exception as exc:
@@ -570,6 +627,7 @@ def _prompt_for_api_key() -> None:
         _show_error("Keychain 写入失败", str(exc), "重新打开 Screen Coach 会再次询问 API key")
         return
     os.environ["ANTHROPIC_API_KEY"] = key
+    _debug_log("API key stored")
 
 
 def main() -> None:

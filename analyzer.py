@@ -46,6 +46,52 @@ ANALYSIS_SCHEMA = {
 }
 
 
+TRANSLATE_PROMPT = (
+    "You translate English into Simplified Chinese. Read the English in the "
+    "image and reply with ONLY the translation — no notes, no pinyin, no "
+    "explanation, no quotes around it. If the image has no readable English, "
+    "reply exactly 未识别到英文."
+)
+
+
+def translate_image(client, image_b64: str, model: str = config.QUICK_MODEL) -> dict:
+    """Translation only — the fast path.
+
+    Returns the same shape as analyze_image() with the breakdown fields empty,
+    so the renderer, the history file and the viewer need no special case. What
+    makes this fast is the ~30 output tokens instead of ~500; the model is
+    smaller because translation doesn't need the reasoning headroom, not because
+    the model is what the latency depends on.
+
+    No structured output here: a bare string response avoids the JSON scaffolding
+    tokens, which matters when the payload is one sentence.
+    """
+    resp = client.messages.create(
+        model=model,
+        max_tokens=config.QUICK_MAX_TOKENS,
+        system=TRANSLATE_PROMPT,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_b64}},
+                    {"type": "text", "text": "Translate the English in this image."},
+                ],
+            }
+        ],
+    )
+    text = next((b.text for b in resp.content if b.type == "text"), "").strip()
+    return {
+        "sentence": "",
+        "translation": text or "未识别到英文",
+        "breakdown": "",
+        "words": [],
+        "usage": [],
+        "summary": "",
+        "quick": True,          # marks the entry in history as translation-only
+    }
+
+
 def analyze_image(client, image_b64: str, model: str = config.MODEL) -> dict:
     """Return a parsed learning breakdown for the English in a base64 PNG."""
     resp = client.messages.create(

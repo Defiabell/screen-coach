@@ -1,5 +1,7 @@
 import json
+
 import analyzer
+import config
 
 
 class _Block:
@@ -47,3 +49,42 @@ def test_analyze_image_parses_and_sends_image():
     assert content[0]["source"]["data"] == "ZmFrZQ=="
     # structured output requested
     assert client.last_kwargs["output_config"]["format"]["type"] == "json_schema"
+
+
+def test_translate_image_shape_matches_analyze(monkeypatch):
+    """The fast path must return the same shape, so nothing downstream forks."""
+    class FakeBlock:
+        type = "text"
+        text = "  委员会一直在讨论这份提案。  "
+
+    class FakeResp:
+        content = [FakeBlock()]
+
+    class FakeClient:
+        class messages:
+            @staticmethod
+            def create(**kw):
+                # translation-only: no structured output, cheap model, small cap
+                assert "output_config" not in kw
+                assert kw["model"] == config.QUICK_MODEL
+                assert kw["max_tokens"] == config.QUICK_MAX_TOKENS
+                return FakeResp()
+
+    out = analyzer.translate_image(FakeClient(), "Zm9v")
+    assert out["translation"] == "委员会一直在讨论这份提案。"   # stripped
+    assert out["quick"] is True
+    assert set(out) >= {"sentence", "translation", "breakdown", "words", "usage", "summary"}
+    assert out["words"] == [] and out["usage"] == []
+
+
+def test_translate_image_falls_back_when_model_returns_nothing():
+    class FakeResp:
+        content = []
+
+    class FakeClient:
+        class messages:
+            @staticmethod
+            def create(**kw):
+                return FakeResp()
+
+    assert analyzer.translate_image(FakeClient(), "Zm9v")["translation"] == "未识别到英文"

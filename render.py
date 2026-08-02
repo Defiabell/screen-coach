@@ -55,31 +55,46 @@ function renderAnalysis(a) {{
   m.innerHTML = "";
   const sent = document.createElement("div");
   sent.className = "sentence";
-  sent.innerHTML = esc(a.sentence);
-  sent.appendChild(spk(a.sentence)); sent.appendChild(spk(a.sentence, true));
-  m.appendChild(sent);
+  // Quick-translate entries carry only a translation, so every section below is
+  // rendered only when it actually has content — otherwise the window would show
+  // four bare headings under the Chinese line.
+  if (a.sentence) {{
+    sent.innerHTML = esc(a.sentence);
+    sent.appendChild(spk(a.sentence)); sent.appendChild(spk(a.sentence, true));
+    m.appendChild(sent);
+  }}
   const zh = document.createElement("div"); zh.className = "zh"; zh.textContent = a.translation || ""; m.appendChild(zh);
   const add = (label, node) => {{ const h = document.createElement("div"); h.className="label"; h.textContent=label; m.appendChild(h); m.appendChild(node); }};
-  const bd = document.createElement("div"); bd.textContent = a.breakdown || ""; add("🧩 结构", bd);
-  const wl = document.createElement("div");
-  (a.words || []).forEach(w => {{
-    const row = document.createElement("div"); row.className = "word";
-    row.innerHTML = "<b>" + esc(w.word) + "</b> <span class='ipa'>" + esc(w.ipa) + "</span> — " + esc(w.meaning);
-    row.appendChild(spk(w.word));
-    wl.appendChild(row);
-  }});
-  add("📖 生词", wl);
-  const us = document.createElement("ul");
-  (a.usage || []).forEach(u => {{ const li = document.createElement("li"); li.textContent = u; us.appendChild(li); }});
-  add("🔗 用法", us);
-  const sm = document.createElement("div"); sm.textContent = a.summary || ""; add("📌 小结", sm);
+  if (a.breakdown) {{
+    const bd = document.createElement("div"); bd.textContent = a.breakdown; add("🧩 结构", bd);
+  }}
+  if ((a.words || []).length) {{
+    const wl = document.createElement("div");
+    a.words.forEach(w => {{
+      const row = document.createElement("div"); row.className = "word";
+      row.innerHTML = "<b>" + esc(w.word) + "</b> <span class='ipa'>" + esc(w.ipa) + "</span> — " + esc(w.meaning);
+      row.appendChild(spk(w.word));
+      wl.appendChild(row);
+    }});
+    add("📖 生词", wl);
+  }}
+  if ((a.usage || []).length) {{
+    const us = document.createElement("ul");
+    a.usage.forEach(u => {{ const li = document.createElement("li"); li.textContent = u; us.appendChild(li); }});
+    add("🔗 用法", us);
+  }}
+  if (a.summary) {{
+    const sm = document.createElement("div"); sm.textContent = a.summary; add("📌 小结", sm);
+  }}
 }}
 
 function renderHist() {{
   const h = document.getElementById("hist");
   RECENT.forEach(item => {{
     const d = document.createElement("div"); d.className = "hist";
-    d.textContent = (item.sentence || "").slice(0, 40);
+    // Quick-translate entries have no `sentence`; fall back to the translation
+    // so they don't show up as blank rows.
+    d.textContent = (item.sentence || item.translation || "").slice(0, 40);
     d.onclick = () => show(item);
     h.appendChild(d);
   }});

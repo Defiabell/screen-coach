@@ -51,19 +51,9 @@ def test_prompt_for_api_key_saves_on_ok(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     saved = []
     monkeypatch.setattr(app.keychain, "set_key", lambda v: saved.append(v))
-
-    class FakeResponse:
-        clicked = 1
-        text = "sk-typed-in"
-
-    class FakeWindow:
-        def __init__(self, **kwargs):
-            pass
-
-        def run(self):
-            return FakeResponse()
-
-    monkeypatch.setattr(app.rumps, "Window", FakeWindow)
+    # Patch the dialog seam, not the UI toolkit: _ask_for_key() runs a real
+    # NSAlert, which in a test run would block forever waiting to be clicked.
+    monkeypatch.setattr(app, "_ask_for_key", lambda: "sk-typed-in")
 
     app._prompt_for_api_key()
 
@@ -72,22 +62,11 @@ def test_prompt_for_api_key_saves_on_ok(monkeypatch):
 
 
 def test_prompt_for_api_key_cancelled_does_nothing(monkeypatch):
+    monkeypatch.setattr(os, "environ", os.environ.copy())
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     saved = []
     monkeypatch.setattr(app.keychain, "set_key", lambda v: saved.append(v))
-
-    class FakeResponse:
-        clicked = 0
-        text = ""
-
-    class FakeWindow:
-        def __init__(self, **kwargs):
-            pass
-
-        def run(self):
-            return FakeResponse()
-
-    monkeypatch.setattr(app.rumps, "Window", FakeWindow)
+    monkeypatch.setattr(app, "_ask_for_key", lambda: None)  # cancelled
 
     app._prompt_for_api_key()
 
@@ -95,35 +74,39 @@ def test_prompt_for_api_key_cancelled_does_nothing(monkeypatch):
     assert "ANTHROPIC_API_KEY" not in os.environ
 
 
-def test_prompt_for_api_key_ambiguous_clicked_code_treated_as_cancel(monkeypatch):
-    """rumps's OK/Cancel return-value encoding isn't unambiguous across NSAlert
-    code paths (see the `== 1` comment in app.py) — a non-1 "clicked" value
-    (e.g. 2, as some encodings use for a secondary button) must still be
-    treated as cancel, not truthily accepted as a click."""
+def test_prompt_for_api_key_ignores_blank_input(monkeypatch):
+    """Clicking 保存 with an empty field must not store an empty key."""
+    monkeypatch.setattr(os, "environ", os.environ.copy())
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     saved = []
     monkeypatch.setattr(app.keychain, "set_key", lambda v: saved.append(v))
-
-    class FakeResponse:
-        clicked = 2
-        text = "sk-should-not-be-saved"
-
-    class FakeWindow:
-        def __init__(self, **kwargs):
-            pass
-
-        def run(self):
-            return FakeResponse()
-
-    monkeypatch.setattr(app.rumps, "Window", FakeWindow)
+    monkeypatch.setattr(app, "_ask_for_key", lambda: "")
 
     app._prompt_for_api_key()
 
     assert saved == []
     assert "ANTHROPIC_API_KEY" not in os.environ
+
+
+def test_prompt_for_api_key_survives_a_broken_dialog(monkeypatch):
+    """A dialog that raises must not take the app down — it starts the app."""
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    saved = []
+    monkeypatch.setattr(app.keychain, "set_key", lambda v: saved.append(v))
+
+    def _boom():
+        raise RuntimeError("NSAlert exploded")
+
+    monkeypatch.setattr(app, "_ask_for_key", _boom)
+
+    app._prompt_for_api_key()  # must not raise
+
+    assert saved == []
 
 
 def test_prompt_for_api_key_keychain_write_failure_shows_error(monkeypatch):
+    monkeypatch.setattr(os, "environ", os.environ.copy())
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
     def _boom(_value):
@@ -132,23 +115,11 @@ def test_prompt_for_api_key_keychain_write_failure_shows_error(monkeypatch):
     monkeypatch.setattr(app.keychain, "set_key", _boom)
     shown = []
     monkeypatch.setattr(app, "_show_error", lambda *a: shown.append(a))
-
-    class FakeResponse:
-        clicked = 1
-        text = "sk-typed-in"
-
-    class FakeWindow:
-        def __init__(self, **kwargs):
-            pass
-
-        def run(self):
-            return FakeResponse()
-
-    monkeypatch.setattr(app.rumps, "Window", FakeWindow)
+    monkeypatch.setattr(app, "_ask_for_key", lambda: "sk-typed-in")
 
     app._prompt_for_api_key()
 
-    assert len(shown) == 1
+    assert shown, "a Keychain write failure must surface in the UI"
     assert "ANTHROPIC_API_KEY" not in os.environ
 
 
@@ -350,3 +321,50 @@ def test_use_region_pref_prefers_new_key_over_old(monkeypatch):
 def test_use_region_pref_defaults_true_on_fresh_install(monkeypatch):
     monkeypatch.setattr(app, "_load_prefs", lambda: {})
     assert app._use_region_pref() is True
+
+
+def _analysis_harness(monkeypatch, calls):
+    """Stub everything _run_analysis touches except the analyzer choice."""
+    monkeypatch.setattr(app.capture, "to_base64", lambda p: "B64")
+    monkeypatch.setattr(app, "_get_client", lambda: object())
+    monkeypatch.setattr(app.history, "append_entry", lambda p, e: None)
+    monkeypatch.setattr(app.history, "load_recent", lambda p: [])
+    monkeypatch.setattr(app.render, "render_html", lambda a, r: "<html>")
+    monkeypatch.setattr(app, "_show", lambda h: None)
+    monkeypatch.setattr(app.os, "unlink", lambda p: None)
+    monkeypatch.setattr(app.analyzer, "analyze_image",
+                        lambda c, b: calls.append("full") or {"translation": "x"})
+    monkeypatch.setattr(app.analyzer, "translate_image",
+                        lambda c, b: calls.append("quick") or {"translation": "x"})
+
+
+def test_run_analysis_uses_quick_path_when_enabled(monkeypatch):
+    calls = []
+    _analysis_harness(monkeypatch, calls)
+    monkeypatch.setattr(app, "_load_prefs", lambda: {"quick_mode": True})
+    app._busy.acquire(blocking=False)
+    app._run_analysis(grab=lambda: "/tmp/x.png")
+    assert calls == ["quick"]
+
+
+def test_run_analysis_uses_full_path_by_default(monkeypatch):
+    calls = []
+    _analysis_harness(monkeypatch, calls)
+    monkeypatch.setattr(app, "_load_prefs", lambda: {})
+    app._busy.acquire(blocking=False)
+    app._run_analysis(grab=lambda: "/tmp/x.png")
+    assert calls == ["full"]
+
+
+def test_quick_mode_pref_read_per_analysis(monkeypatch):
+    """Toggling the menu must apply to the next trigger without a restart."""
+    mode = {"quick_mode": False}
+    calls = []
+    _analysis_harness(monkeypatch, calls)
+    monkeypatch.setattr(app, "_load_prefs", lambda: dict(mode))
+    app._busy.acquire(blocking=False)
+    app._run_analysis(grab=lambda: "/tmp/x.png")
+    mode["quick_mode"] = True
+    app._busy.acquire(blocking=False)
+    app._run_analysis(grab=lambda: "/tmp/x.png")
+    assert calls == ["full", "quick"]
