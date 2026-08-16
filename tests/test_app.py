@@ -19,9 +19,11 @@ def isolate_debug_log(monkeypatch, tmp_path):
     Test-stub tracebacks written there ("NSAlert exploded") are
     indistinguishable from the installed app's own entries and have derailed
     a real investigation once."""
-    monkeypatch.setattr(
-        app, "_debug_log", lambda msg: (tmp_path / "debug.log").open("a").write(f"{msg}\n")
-    )
+    def _log(msg):
+        with (tmp_path / "debug.log").open("a") as f:
+            f.write(f"{msg}\n")
+
+    monkeypatch.setattr(app, "_debug_log", _log)
 
 
 @pytest.fixture(autouse=True)

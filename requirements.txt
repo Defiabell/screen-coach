@@ -3,6 +3,5 @@ rumps
 pywebview
 pyobjc-framework-ApplicationServices
 pyobjc-framework-Quartz
-pyobjc-framework-Security
 pytest
 py2app

@@ -84,3 +84,10 @@ def test_set_key_rejects_values_that_cannot_be_stored_faithfully():
     for bad in ('with space', 'quote"inside', 'back\\slash', '换行\n'):
         with pytest.raises(RuntimeError, match="非法字符"):
             keychain.set_key(bad)
+
+
+def test_leading_dash_value_round_trips():
+    """Regression guard for the -w argument being misparsed as a CLI flag —
+    this codebase shipped exactly that bug once (`say` in viewer.py)."""
+    keychain.set_key("-sk-looks-like-a-flag")
+    assert keychain.get_key() == "-sk-looks-like-a-flag"

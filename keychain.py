@@ -40,6 +40,11 @@ _SECURITY = "/usr/bin/security"
 # "no key" / error path.
 READ_TIMEOUT = 5.0
 WRITE_TIMEOUT = 5.0
+# _write runs delete + add sequentially inside set_key's WRITE_TIMEOUT-bounded
+# join, so each subprocess gets less than half that budget — the join deadline
+# is then safe by arithmetic, not by measurement. (Both ops measure ~15ms even
+# against a legacy cross-binary item.)
+_SUBPROCESS_TIMEOUT = 2.0
 
 # The value is embedded in a `security -i` command line, so restrict it to
 # printable ASCII without quotes/backslashes/whitespace. Real Anthropic keys
@@ -72,7 +77,7 @@ def _write(value: str) -> None:
     subprocess.run(
         [_SECURITY, "delete-generic-password", "-s", SERVICE, "-a", ACCOUNT],
         capture_output=True,
-        timeout=WRITE_TIMEOUT,
+        timeout=_SUBPROCESS_TIMEOUT,
     )  # item-not-found is fine — nothing to replace
     # -i reads commands from stdin, keeping the secret out of argv (visible in
     # `ps` for the process's lifetime otherwise).
@@ -81,7 +86,7 @@ def _write(value: str) -> None:
         input=f'add-generic-password -s {SERVICE} -a {ACCOUNT} -w "{value}"\n',
         capture_output=True,
         text=True,
-        timeout=WRITE_TIMEOUT,
+        timeout=_SUBPROCESS_TIMEOUT,
     )
     if proc.returncode != 0:
         raise RuntimeError(
