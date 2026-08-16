@@ -39,23 +39,17 @@ export function renderPage({ date, spentUsd, budgetUsd }) {
 <a href="https://github.com/Defiabell/screen-coach">下载 app</a>；网页版这样用：</p>
 
 <ol style="background:#f6f8f7;border-radius:10px;padding:0.9em 1.2em 0.9em 2.4em;margin:0.8em 0">
-  <li>按 <b>⇧⌃⌘4</b> 框选屏幕上的英文（Windows：<b>Win+Shift+S</b>），截图自动进剪贴板；</li>
-  <li>切回本页 —— <b>自动读取剪贴板并解析</b>（首次浏览器会请求剪贴板权限；没弹或用 Safari 就按 <b>⌘V</b>）；</li>
-  <li>秒出翻译和生词卡。</li>
+  <li><b>用系统自带的截图快捷键</b>把英文截进剪贴板：<br>
+      macOS 按 <b>⇧⌃⌘4</b>（Shift+Control+Command+4）后拖拽框选；<br>
+      Windows 按 <b>Win+Shift+S</b> 后框选。松手即截好，屏幕上不会有任何提示，图已在剪贴板里。</li>
+  <li><b>切回本页粘贴</b>：按 <b>⌘V</b>（Windows：Ctrl+V），页面立刻开始解析。<br>
+      <span style="color:#888">Chrome/Edge/Arc 用户更省事：切回本页就会自动读取剪贴板（首次会弹一次
+      「允许读取剪贴板」授权，点允许即可，此后连粘贴都不用按；页面只读图片、从不读你剪贴板里的文字）。</span></li>
+  <li>约 3 秒后出中文翻译和生词卡；勾选下方「完整解析」可加句子结构和用法。</li>
 </ol>
 
-<div class="drop" id="drop">或：⌘V 粘贴 / 拖拽图片到这里 / 点击选择文件</div>
-<p style="text-align:center;margin:0.4em 0">
-  <button id="shot" type="button" style="background:#aaa;font-size:0.85em;padding:0.3em 0.9em">备用：页面内截屏</button>
-</p>
+<div class="drop" id="drop">粘贴（⌘V）后的截图会显示在这里 · 也可拖拽图片进来或点击选择文件</div>
 <input type="file" id="file" accept="image/*" hidden>
-<div id="cropWrap" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:9;cursor:crosshair;overflow:auto;text-align:center">
-  <p style="color:#fff;margin:0.6em">在截图上拖拽框选要解析的区域（Esc 取消）</p>
-  <div style="position:relative;display:inline-block">
-    <canvas id="cropCanvas" style="max-width:96vw;display:block"></canvas>
-    <div id="cropBox" style="position:absolute;border:2px solid #2a7;background:rgba(42,170,119,.15);display:none"></div>
-  </div>
-</div>
 <p style="text-align:center;color:#aaa;margin:0.5em 0">—— 或 ——</p>
 <textarea id="text" placeholder="输入或粘贴一句英文，例如：The committee deliberated the proposal."></textarea>
 <p>
@@ -113,67 +107,6 @@ function tryClipboard() {
 }
 window.addEventListener("focus", tryClipboard);
 
-// In-page screen grab: getDisplayMedia one frame → drag-select crop → analyze.
-var shotBtn = document.getElementById("shot");
-if (!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia)) shotBtn.style.display = "none";
-shotBtn.addEventListener("click", function () {
-  navigator.mediaDevices.getDisplayMedia({ video: true, audio: false }).then(function (stream) {
-    var video = document.createElement("video");
-    video.srcObject = stream;
-    video.muted = true;
-    video.play();
-    video.addEventListener("loadeddata", function () {
-      setTimeout(function () {
-        var c = document.getElementById("cropCanvas");
-        c.width = video.videoWidth;
-        c.height = video.videoHeight;
-        c.getContext("2d").drawImage(video, 0, 0);
-        stream.getTracks().forEach(function (t) { t.stop(); });
-        openCrop();
-      }, 200); // let the first real frame land
-    });
-  }).catch(function () { /* user cancelled the share dialog */ });
-});
-
-var cropWrap = document.getElementById("cropWrap");
-var cropBox = document.getElementById("cropBox");
-function openCrop() {
-  cropWrap.style.display = "block";
-  cropBox.style.display = "none";
-  var c = document.getElementById("cropCanvas");
-  var start = null;
-  function pos(e) {
-    var r = c.getBoundingClientRect();
-    return { x: Math.min(Math.max(e.clientX - r.left, 0), r.width), y: Math.min(Math.max(e.clientY - r.top, 0), r.height), r: r };
-  }
-  c.onmousedown = function (e) { start = pos(e); e.preventDefault(); };
-  c.onmousemove = function (e) {
-    if (!start) return;
-    var p = pos(e);
-    cropBox.style.display = "block";
-    cropBox.style.left = Math.min(start.x, p.x) + "px";
-    cropBox.style.top = Math.min(start.y, p.y) + "px";
-    cropBox.style.width = Math.abs(p.x - start.x) + "px";
-    cropBox.style.height = Math.abs(p.y - start.y) + "px";
-  };
-  c.onmouseup = function (e) {
-    if (!start) return;
-    var p = pos(e);
-    var scale = c.width / p.r.width; // displayed px → canvas px
-    var x = Math.min(start.x, p.x) * scale, y = Math.min(start.y, p.y) * scale;
-    var w = Math.abs(p.x - start.x) * scale, h = Math.abs(p.y - start.y) * scale;
-    start = null;
-    closeCrop();
-    if (w < 8 || h < 8) return; // a click, not a selection
-    var out = document.createElement("canvas");
-    out.width = w; out.height = h;
-    out.getContext("2d").drawImage(c, x, y, w, h, 0, 0, w, h);
-    out.toBlob(function (blob) { loadImage(blob); }, "image/png");
-  };
-  document.addEventListener("keydown", escCrop);
-}
-function escCrop(e) { if (e.key === "Escape") closeCrop(); }
-function closeCrop() { cropWrap.style.display = "none"; document.removeEventListener("keydown", escCrop); }
 ["dragover", "dragleave", "drop"].forEach(function (ev) {
   drop.addEventListener(ev, function (e) {
     e.preventDefault();

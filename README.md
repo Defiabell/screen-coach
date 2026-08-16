@@ -15,15 +15,15 @@ Nothing to install and no API key needed — open
 [screen-coach-trial.defiabell.workers.dev](https://screen-coach-trial.defiabell.workers.dev)
 and use it right away. Four ways in:
 
-1. **System screenshot → switch back (recommended)** — press macOS's
-   built-in ⇧⌃⌘4 to select any screen region (Windows: Win+Shift+S), then
-   switch back to the page: it **reads the clipboard and analyzes
-   automatically** (one-time clipboard permission; Safari doesn't allow the
-   auto-read — just hit ⌘V there).
-2. **⌘V paste / drag in / pick an image file.**
+1. **System screenshot → paste (the main path)** — press macOS's built-in
+   ⇧⌃⌘4 (Shift+Control+Command+4) to select the English on screen; the
+   screenshot lands on the clipboard (Windows: Win+Shift+S). Switch back to
+   the page and hit ⌘V — it analyzes immediately. On Chrome/Edge/Arc it's
+   even simpler: switching back auto-reads the clipboard, no paste needed
+   (one-time permission; the page only ever reads images, never your
+   clipboard text).
+2. **Drag in / pick an image file.**
 3. **Type an English sentence** and press Enter.
-4. Fallback: in-page screen grab (browser screen-share API; clunkier, not
-   recommended).
 
 Results match the app: Chinese translation plus word cards (IPA, meaning in
 this sentence, common other meanings); tick 完整解析 for sentence structure,
