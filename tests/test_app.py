@@ -13,6 +13,18 @@ import app
 
 
 @pytest.fixture(autouse=True)
+def isolate_debug_log(monkeypatch, tmp_path):
+    """Keep tests out of the developer's real ~/Library/Logs debug log.
+
+    Test-stub tracebacks written there ("NSAlert exploded") are
+    indistinguishable from the installed app's own entries and have derailed
+    a real investigation once."""
+    monkeypatch.setattr(
+        app, "_debug_log", lambda msg: (tmp_path / "debug.log").open("a").write(f"{msg}\n")
+    )
+
+
+@pytest.fixture(autouse=True)
 def isolate_prefs(monkeypatch):
     """Keep tests off the developer's real prefs.json.
 
@@ -382,3 +394,35 @@ def test_quick_mode_pref_read_per_analysis(monkeypatch):
     app._busy.acquire(blocking=False)
     app._run_analysis(grab=lambda: "/tmp/x.png")
     assert calls == ["full", "quick"]
+
+
+# --- hotkey wiring: current binding is lazy-loaded from prefs, settable live --
+
+def test_current_hotkey_defaults_when_prefs_empty(monkeypatch):
+    import hotkey
+    monkeypatch.setattr(app, "_hotkey_binding", None)
+    assert app._current_hotkey() == hotkey.DEFAULT
+
+
+def test_current_hotkey_reads_pref(monkeypatch):
+    monkeypatch.setattr(app, "_hotkey_binding", None)
+    stored = {"keycode": 1, "modifiers": ["cmd"], "display": "S"}
+    monkeypatch.setattr(app, "_load_prefs", lambda: {"hotkey": stored})
+    assert app._current_hotkey() == stored
+
+
+def test_current_hotkey_survives_malformed_pref(monkeypatch):
+    import hotkey
+    monkeypatch.setattr(app, "_hotkey_binding", None)
+    monkeypatch.setattr(app, "_load_prefs", lambda: {"hotkey": "garbage"})
+    assert app._current_hotkey() == hotkey.DEFAULT
+
+
+def test_set_hotkey_persists_and_takes_effect_immediately(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(app, "_save_pref", lambda k, v: saved.update({k: v}))
+    monkeypatch.setattr(app, "_hotkey_binding", None)
+    binding = {"keycode": 1, "modifiers": ["cmd"], "display": "S"}
+    app._set_hotkey(binding)
+    assert saved == {"hotkey": binding}
+    assert app._current_hotkey() == binding
