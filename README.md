@@ -9,6 +9,31 @@ and a history list.
 **Try it online first** → https://screen-coach-trial.defiabell.workers.dev
 (no install, no key: paste a screenshot or type a sentence, free within the trial quota.)
 
+## Try it online (web version)
+
+Nothing to install and no API key needed — open
+[screen-coach-trial.defiabell.workers.dev](https://screen-coach-trial.defiabell.workers.dev)
+and use it right away. Four ways in:
+
+1. **System screenshot + paste (recommended)** — press macOS's built-in
+   ⇧⌃⌘4 to select any screen region (goes to the clipboard), switch to the
+   page and hit ⌘V; the analysis runs automatically.
+2. **In-page screen grab** — click "📸 截取屏幕", grant the browser's
+   screen-share prompt, drag-select the part to analyze; runs automatically.
+3. **Drag in / pick an image file.**
+4. **Type an English sentence** and press Enter.
+
+Results match the app: Chinese translation plus word cards (IPA, meaning in
+this sentence, common other meanings); tick 完整解析 for sentence structure,
+usage points and a summary. The 🔊 next to each word speaks it via the
+browser's speech engine. Images are downscaled to 1600px locally before
+upload; quick mode typically answers in ~3s.
+
+Trial quota: 20 analyses per device per day (plus a shared global daily
+budget). The web version's limit: browsers can't register a **global**
+hotkey — one-keystroke capture from inside any app is what the native app is
+for, and the reason to download it.
+
 ## Two ways to grab the text
 
 - **A persistent region** — leave a thin framing rectangle over the area you
