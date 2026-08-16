@@ -126,3 +126,24 @@ def test_history_row_labels_quick_entries_by_translation():
     dom = _run_render(_FULL, recent=[_QUICK, _FULL])
     assert dom["hist"][0] == "委员会一直在讨论这份提案。"
     assert dom["hist"][1] == "The committee deliberated."
+
+
+def test_word_with_other_meanings_renders_them_dimmed():
+    entry = dict(_FULL)
+    entry["words"] = [{"word": "deliberate", "ipa": "/dɪˈlɪbəreɪt/",
+                       "meaning": "审议", "other_meanings": ["adj. 蓄意的", "深思熟虑的"]}]
+    dom = _run_render(entry)
+    joined = " ".join(dom["main"])
+    # the DOM stub's esc() yields empty strings, so assert the label and the
+    # alt-span structure rather than the escaped meaning text itself
+    assert "另义" in joined
+    assert "class='alt'" in joined
+
+
+def test_word_without_other_meanings_field_renders_clean():
+    """History entries written before the field existed must not show
+    'undefined' or an empty 另义 label."""
+    dom = _run_render(_FULL)  # _FULL's word has no other_meanings key
+    joined = " ".join(dom["main"])
+    assert "另义" not in joined
+    assert "undefined" not in joined

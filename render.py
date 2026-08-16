@@ -21,6 +21,7 @@ _PAGE = """<!doctype html>
   .label {{ color:#e0a; font-weight:bold; margin-top:12px; }}
   .word {{ margin:3px 0; }}
   .ipa {{ color:#3a9d7f; }}
+  .alt {{ color:#8a8a8a; font-size:12px; }}
   button.spk {{ background:#333; color:#fff; border:none; border-radius:4px; cursor:pointer; margin-left:6px; }}
 </style></head>
 <body><div class="wrap">
@@ -72,7 +73,9 @@ function renderAnalysis(a) {{
     const wl = document.createElement("div");
     a.words.forEach(w => {{
       const row = document.createElement("div"); row.className = "word";
-      row.innerHTML = "<b>" + esc(w.word) + "</b> <span class='ipa'>" + esc(w.ipa) + "</span> — " + esc(w.meaning);
+      const alts = (w.other_meanings || []);
+      row.innerHTML = "<b>" + esc(w.word) + "</b> <span class='ipa'>" + esc(w.ipa) + "</span> — " + esc(w.meaning)
+        + (alts.length ? " <span class='alt'>另义：" + alts.map(esc).join("；") + "</span>" : "");
       row.appendChild(spk(w.word));
       wl.appendChild(row);
     }});
