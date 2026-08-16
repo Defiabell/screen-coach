@@ -1,5 +1,7 @@
 # screen-coach
 
+English | [简体中文](README.zh-CN.md)
+
 Mac menu-bar tool: pick an English sentence on screen → Claude breaks it down
 (translation, 拆句, 生词, 用法) in a floating window with pronunciation playback
 and a history list.
@@ -37,6 +39,15 @@ sentence or a word.
 
 Analyses are appended to `~/Library/Application Support/Screen Coach/history.jsonl`
 and the last 20 are listed in the window; clicking one re-renders it.
+
+## Requirements
+
+- **macOS**: developed and tested on macOS 15 (Apple Silicon); older versions
+  (roughly 12+) should work but aren't verified per-release. Intel Macs need
+  a local build.
+- **No browser needed**: the floating window renders with the system WebKit
+  (WKWebView via pywebview) — your Chrome/Safari versions are irrelevant.
+- **Building locally** needs Python 3.9+ (the system `python3` is fine).
 
 ## Build and install
 

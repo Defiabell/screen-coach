@@ -92,13 +92,31 @@ export default {
     const url = new URL(request.url);
 
     // Aggregate spend readout for the owner; no secrets, no per-user data.
+    // Browsers get a small human-readable page (raw JSON reads as "broken"
+    // to a person); curl/scripts keep getting JSON.
     if (request.method === "GET" && url.pathname === "/") {
       const date = today();
       const spent = parseFloat((await env.TRIAL_KV.get(`spend:${date}`)) || "0");
+      const spentUsd = Math.round(spent * 10000) / 10000;
+      if ((request.headers.get("accept") || "").includes("text/html")) {
+        const pct = Math.min(100, Math.round((spentUsd / LIMITS.globalDailyUsd) * 100));
+        return new Response(
+          `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>screen-coach 体验服务</title>
+<body style="font-family:system-ui;max-width:34em;margin:8vh auto;padding:0 1em;line-height:1.7">
+<h1 style="font-size:1.3em">📖 screen-coach 体验服务</h1>
+<p>状态：<b style="color:#2a7">运行中</b>（这个地址是给 app 用的接口，不是网页应用）。</p>
+<p>今日（${date}，UTC）已用额度：<b>$${spentUsd}</b> / $${LIMITS.globalDailyUsd}</p>
+<div style="background:#eee;border-radius:6px;height:10px"><div style="background:#2a7;border-radius:6px;height:10px;width:${pct}%"></div></div>
+<p style="color:#777;font-size:0.9em">下载 app：<a href="https://github.com/Defiabell/screen-coach">github.com/Defiabell/screen-coach</a></p>
+</body>`,
+          { headers: { "content-type": "text/html; charset=utf-8" } },
+        );
+      }
       return Response.json({
         service: "screen-coach-trial",
         date,
-        spent_usd: Math.round(spent * 10000) / 10000,
+        spent_usd: spentUsd,
         budget_usd: LIMITS.globalDailyUsd,
       });
     }
