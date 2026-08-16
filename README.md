@@ -24,7 +24,9 @@ and a history list.
 - **The menu bar** — `Analyze Region` and `Analyze Selection` are always both
   available there regardless of the mode switch.
 - **⇧⌘E** — a global hotkey for drag-select. Needs Accessibility permission;
-  everything else works without it.
+  everything else works without it. Rebindable: menu → `Set Hotkey…` opens a
+  small panel — press the new combo (it must include ⌘/⌥/⌃; Esc cancels) and
+  it applies immediately, no restart. The menu item shows the current binding.
 
 `Use Region` in the menu is a mode switch, not a display toggle: checked means
 a ball click analyzes the persistent region (and shows the frame so you can see

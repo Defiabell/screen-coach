@@ -21,6 +21,7 @@ import capture
 import config
 import floatball
 import history
+import hotkey
 import keychain
 import loginitem
 import region
@@ -32,6 +33,8 @@ _viewer_proc: subprocess.Popen | None = None
 _viewer_html: str | None = None       # temp HTML backing the current viewer, for cleanup
 _busy = threading.Lock()              # debounce: one analysis at a time
 _hotkey_monitor = None                # retain the NSEvent global monitor
+_hotkey_binding: dict | None = None   # active binding; None = not loaded from prefs yet
+_recorder = None                      # (panel, monitor-holder) while Set Hotkey… is open
 
 
 def _get_client():
@@ -280,6 +283,24 @@ def _save_pref(key: str, value) -> None:
         traceback.print_exc()
 
 
+def _current_hotkey() -> dict:
+    """The active binding, lazy-loaded from prefs on first use. Cached in a
+    module global so the CGEventTap callback (which runs on every keydown
+    system-wide) never touches the filesystem."""
+    global _hotkey_binding
+    if _hotkey_binding is None:
+        _hotkey_binding = hotkey.normalize(_load_prefs().get("hotkey"))
+    return _hotkey_binding
+
+
+def _set_hotkey(binding: dict) -> None:
+    """Persist and apply a new binding. The tap callback reads _hotkey_binding
+    on each keydown, so this takes effect without reinstalling the tap."""
+    global _hotkey_binding
+    _hotkey_binding = binding
+    _save_pref("hotkey", binding)
+
+
 class _MenuAction(NSObject):
     """Objective-C target for a plain Python callable.
 
@@ -337,6 +358,13 @@ class ScreenCoach(rumps.App):
         quick_item = rumps.MenuItem("Quick Translate", callback=self._on_toggle_quick)
         quick_item.state = _quick_mode_pref()
 
+        # Held as an attribute (not looked up by title like the toggles) because
+        # its title embeds the current binding and changes on every rebind.
+        self._hotkey_item = rumps.MenuItem(
+            self._hotkey_title(),
+            callback=lambda _: _record_hotkey(self._refresh_hotkey_title),
+        )
+
         self.menu = [
             rumps.MenuItem("Analyze Selection", callback=lambda _: _trigger()),
             rumps.MenuItem("Analyze Region", callback=lambda _: _trigger_region()),
@@ -347,9 +375,16 @@ class ScreenCoach(rumps.App):
             ball_item,
             login_item,
             None,
+            self._hotkey_item,
             rumps.MenuItem("Set API Key…", callback=lambda _: _set_api_key()),
             rumps.MenuItem("Quit", callback=self._quit),
         ]
+
+    def _hotkey_title(self) -> str:
+        return f"Set Hotkey… ({hotkey.format_binding(_current_hotkey())})"
+
+    def _refresh_hotkey_title(self):
+        self._hotkey_item.title = self._hotkey_title()
 
     def _on_toggle_login_item(self, sender):
         sender.state = _toggle_login_item(sender.state)
@@ -422,6 +457,7 @@ class ScreenCoach(rumps.App):
             checked=bool(login.state) if login is not None else False,
             enabled=getattr(sys, "frozen", False))
         menu.addItem_(NSMenuItem.separatorItem())
+        add(self._hotkey_title(), lambda: _record_hotkey(self._refresh_hotkey_title))
         add("Set API Key…", _set_api_key)
         add("Quit", lambda: self._quit(None))
         return menu
@@ -474,7 +510,8 @@ def _debug_log(msg: str) -> None:
 
 
 def _start_hotkey() -> None:
-    """Register the global ⇧⌘E hotkey via a CGEventTap on the MAIN run loop.
+    """Register the global hotkey (default ⇧⌘E, configurable via Set Hotkey…)
+    with a CGEventTap on the MAIN run loop.
 
     NOT NSEvent.addGlobalMonitorForEventsMatchingMask_handler_: that monitor is
     passive and — measured, not guessed — never receives Command-modified
@@ -491,7 +528,7 @@ def _start_hotkey() -> None:
     'Analyze selection' path keeps working either way).
     """
     global _hotkey_monitor
-    from AppKit import NSEvent
+    from AppKit import NSEvent, NSOperationQueue
     from Quartz import (
         CFMachPortCreateRunLoopSource,
         CFRunLoopAddSource,
@@ -502,14 +539,14 @@ def _start_hotkey() -> None:
         CGEventTapEnable,
         kCFRunLoopCommonModes,
         kCGEventKeyDown,
+        kCGEventTapDisabledByTimeout,
+        kCGEventTapDisabledByUserInput,
+        kCGEventTapOptionDefault,
         kCGEventTapOptionListenOnly,
         kCGHeadInsertEventTap,
         kCGKeyboardEventKeycode,
         kCGSessionEventTap,
     )
-
-    CMD, SHIFT = 1 << 20, 1 << 17   # NSCommandKeyMask, NSShiftKeyMask
-    KEY_E = 14                      # macOS virtual key code for 'e'
 
     try:
         from ApplicationServices import (
@@ -532,34 +569,66 @@ def _start_hotkey() -> None:
         trusted = f"check failed: {exc}"
     _debug_log(f"_start_hotkey: pid={os.getpid()} AXIsProcessTrusted={trusted}")
 
+    tap_holder = []  # filled after creation; the callback needs it to self-heal
+
     def _callback(proxy, etype, event, refcon):
         try:
+            # The system disables a tap whose callback it judged too slow (or
+            # during secure input). That notification is the only chance to
+            # recover — re-enable and move on.
+            if etype in (kCGEventTapDisabledByTimeout, kCGEventTapDisabledByUserInput):
+                if tap_holder:
+                    _debug_log(f"tap disabled by system (etype={etype}); re-enabling")
+                    CGEventTapEnable(tap_holder[0], True)
+                return event
             keycode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
             ns = NSEvent.eventWithCGEvent_(event)
             flags = ns.modifierFlags() if ns else 0
-            if (flags & CMD) and (flags & SHIFT) and keycode == KEY_E:
-                _debug_log(f"MATCH ⇧⌘E (flags={flags:#x}) -> _trigger()")
-                _trigger()
+            binding = _current_hotkey()
+            # While the Set Hotkey… recorder is open, the old binding must not
+            # fire — the user is mid-way through replacing it.
+            if _recorder is None and hotkey.matches(binding, keycode, flags):
+                _debug_log(
+                    f"MATCH {hotkey.format_binding(binding)} (flags={flags:#x}) -> _trigger()"
+                )
+                # Enqueue instead of calling inline: an ACTIVE tap's callback
+                # holds up delivery of this keystroke to every app until it
+                # returns, so it must never run _trigger's TCC preflight or
+                # error window itself.
+                NSOperationQueue.mainQueue().addOperationWithBlock_(_trigger)
         except Exception:  # noqa: BLE001 - a raising tap callback gets disabled by the system
             _debug_log(f"tap callback error: {traceback.format_exc()}")
-        return event  # listen-only: hand the event back untouched
+        return event  # pass-through: hand the event back untouched
 
-    tap = CGEventTapCreate(
-        kCGSessionEventTap,
-        kCGHeadInsertEventTap,
-        kCGEventTapOptionListenOnly,
-        CGEventMaskBit(kCGEventKeyDown),
-        _callback,
-        None,
-    )
+    # Listen-only keyboard taps are gated by Input Monitoring on recent macOS,
+    # and — measured on this machine, 2026-08 — Accessibility alone stopped
+    # satisfying them (trusted=True yet CGEventTapCreate returned NULL on every
+    # launch since 8-02). An ACTIVE tap is gated by Accessibility, which we do
+    # hold, so fall back to that; the callback stays pass-through either way.
+    tap = None
+    for mode, option in (
+        ("listen-only", kCGEventTapOptionListenOnly),
+        ("active", kCGEventTapOptionDefault),
+    ):
+        tap = CGEventTapCreate(
+            kCGSessionEventTap,
+            kCGHeadInsertEventTap,
+            option,
+            CGEventMaskBit(kCGEventKeyDown),
+            _callback,
+            None,
+        )
+        if tap:
+            _debug_log(f"CGEventTapCreate({mode}) succeeded")
+            break
+        _debug_log(f"CGEventTapCreate({mode}) returned NULL")
     if not tap:
-        # Almost always missing Accessibility permission. (A diagnostic probe of
-        # every tap location/placement/option combination lived here while this
-        # was being investigated; all four returned NULL together, so the extra
-        # detail bought nothing and its NSEvent probe leaked a monitor on every
-        # permission-less launch.)
-        _debug_log("CGEventTapCreate returned NULL — no Accessibility permission; hotkey disabled")
+        _debug_log(
+            "no event tap available — grant Accessibility (and, for listen-only, "
+            "Input Monitoring); hotkey disabled"
+        )
         return
+    tap_holder.append(tap)
     source = CFMachPortCreateRunLoopSource(None, tap, 0)
     CFRunLoopAddSource(CFRunLoopGetMain(), source, kCFRunLoopCommonModes)
     CGEventTapEnable(tap, True)
@@ -567,6 +636,83 @@ def _start_hotkey() -> None:
     # the tap stops delivering events.
     _hotkey_monitor = (tap, source, _callback)
     _debug_log(f"CGEventTap installed on main run loop: {tap!r}")
+
+
+def _record_hotkey(on_set) -> None:
+    """Small floating panel that captures the next keydown as the new hotkey.
+
+    Uses a LOCAL NSEvent monitor, not the CGEventTap: a local monitor needs no
+    Accessibility permission (so rebinding works even before the tap could be
+    installed) and the recorded keystroke never leaks to other apps.
+    hotkey.record_outcome owns every decision; this owns only Cocoa plumbing.
+    """
+    global _recorder
+    if _recorder is not None:
+        _recorder["panel"].makeKeyAndOrderFront_(None)
+        return
+    from AppKit import (
+        NSApp,
+        NSBackingStoreBuffered,
+        NSEvent,
+        NSEventMaskKeyDown,
+        NSFloatingWindowLevel,
+        NSMakeRect,
+        NSPanel,
+        NSTextField,
+        NSWindowStyleMaskTitled,
+    )
+
+    panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+        NSMakeRect(0, 0, 360, 84), NSWindowStyleMaskTitled, NSBackingStoreBuffered, False
+    )
+    panel.setTitle_("Set Hotkey")
+    panel.setLevel_(NSFloatingWindowLevel)
+    # We close it ourselves and keep a Python reference; letting AppKit release
+    # it on close would leave that reference dangling.
+    panel.setReleasedWhenClosed_(False)
+    label = NSTextField.labelWithString_("按下新的组合键（需含 ⌘/⌥/⌃，Esc 取消）")
+    label.setFrame_(NSMakeRect(20, 30, 320, 24))
+    panel.contentView().addSubview_(label)
+    panel.center()
+
+    def _handler(event):
+        try:
+            chars = str(event.charactersIgnoringModifiers() or "")
+            action, binding = hotkey.record_outcome(
+                event.keyCode(), event.modifierFlags(), chars
+            )
+            if action == "ignore":
+                return None  # swallow and keep waiting for a valid combo
+            if action == "set":
+                _set_hotkey(binding)
+                _debug_log(f"hotkey rebound to {hotkey.format_binding(binding)}")
+                on_set()
+            _close_recorder()
+        except Exception:  # noqa: BLE001 - a raising monitor breaks the app's key input
+            _debug_log(f"recorder error: {traceback.format_exc()}")
+            _close_recorder()
+        return None  # the recorded keystroke must not reach the app's views
+
+    monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+        NSEventMaskKeyDown, _handler
+    )
+    # Retain both: dropping the monitor stops capture, dropping the panel
+    # closes the window under the user.
+    _recorder = {"panel": panel, "monitor": monitor}
+
+    NSApp.activateIgnoringOtherApps_(True)
+    panel.makeKeyAndOrderFront_(None)
+
+
+def _close_recorder() -> None:
+    global _recorder
+    if _recorder is None:
+        return
+    from AppKit import NSEvent
+
+    NSEvent.removeMonitor_(_recorder["monitor"])
+    _recorder["panel"].close()
+    _recorder = None
 
 
 def _build_edit_menu():
