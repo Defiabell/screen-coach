@@ -7,13 +7,22 @@
  *   - per-device daily request count
  *   - per-IP daily request count
  *   - a global daily spend cap in USD, estimated from response usage at list prices
- * Counters live in KV with a 2-day TTL. KV is eventually consistent, so parallel
- * abuse can overshoot a little — the caps bound the order of magnitude, which is
- * all a free trial needs.
+ *
+ * Concurrency model: limits are enforced by a SYNCHRONOUS check-and-reserve
+ * against per-isolate in-memory state (`pending`, below), layered on KV as the
+ * durable floor. A burst of concurrent requests inside one isolate serializes
+ * on the synchronous reservation, so it cannot blow past the caps the way a
+ * naive read-KV → call-upstream → write-KV flow does (that exact bypass was
+ * reproduced in review: 30 concurrent requests, $2 spent against a $1 cap).
+ * Residual exposure — KV write races across isolates/colos (ms-to-60s windows)
+ * — can overshoot by a bounded amount; a $1/day trial tier accepts that, and
+ * the deployer's real backstop should be a spend-limited API key.
  */
 
 // USD per million tokens, matched by model-id prefix. Sonnet 5 uses the
-// post-introductory list price so the budget never undercounts.
+// post-introductory list price so the budget never undercounts. cache_write is
+// priced at the worst-case 2x premium (1h TTL) even though the proxy rejects
+// cache_control bodies — belt and suspenders for the accounting.
 const PRICES = [
   { prefix: "claude-sonnet-5", input: 3.0, output: 15.0 },
   { prefix: "claude-haiku-4-5", input: 1.0, output: 5.0 },
@@ -25,6 +34,11 @@ const LIMITS = {
   globalDailyUsd: 1.0, // hard stop for the owner's wallet
 };
 
+// Pessimistic per-request cost reserved while a request is in flight, released
+// against the actual figure when the response lands. A full analysis measures
+// ~$0.01-0.015; anything reserving above this while under the cap is fine.
+const RESERVE_USD = 0.02;
+
 const MAX_TOKENS_CAP = 4096; // config.MAX_TOKENS in the app; nothing needs more
 const MAX_BODY_BYTES = 8 * 1024 * 1024; // screenshot payloads are ~1-3MB
 const COUNTER_TTL_S = 2 * 24 * 3600;
@@ -32,12 +46,45 @@ const COUNTER_TTL_S = 2 * 24 * 3600;
 const QUOTA_MSG =
   "今日体验额度已用完。想继续使用：菜单 → Set API Key… 填入你自己的 Anthropic API key（走官方直连，不再经过体验服务器）。";
 
+// Per-isolate in-flight reservations. NOT request state — a shared limiter,
+// deliberately module-level so concurrent requests in this isolate see each
+// other before any KV write lands. Keyed by day; reset when the day rolls.
+const pending = { date: "", spend: 0, devices: new Map(), ips: new Map() };
+
+function rollPending(date) {
+  if (pending.date !== date) {
+    pending.date = date;
+    pending.spend = 0;
+    pending.devices.clear();
+    pending.ips.clear();
+  }
+}
+
 function err(status, type, message) {
-  return Response.json({ type: "error", error: { type, message } }, { status });
+  return Response.json(
+    { type: "error", error: { type, message } },
+    // The anthropic SDK auto-retries 429/5xx unless told not to; a quota
+    // rejection is final for the day, so save the user the backoff delay.
+    { status, headers: { "x-should-retry": "false" } },
+  );
 }
 
 function today() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function requestCost(model, usage) {
+  const price = PRICES.find((p) => model.startsWith(p.prefix));
+  if (!price || !usage) return RESERVE_USD; // unknown shape: bill the reserve
+  const cacheWrite = usage.cache_creation_input_tokens || 0;
+  const cacheRead = usage.cache_read_input_tokens || 0;
+  return (
+    ((usage.input_tokens || 0) * price.input +
+      (usage.output_tokens || 0) * price.output +
+      cacheWrite * price.input * 2.0 + // worst-case cache-write premium
+      cacheRead * price.input * 0.1) /
+    1e6
+  );
 }
 
 export default {
@@ -64,35 +111,15 @@ export default {
     if (!/^[0-9a-fA-F-]{36}$/.test(device)) {
       return err(400, "invalid_request_error", "missing or malformed x-trial-device header");
     }
-    const contentLength = parseInt(request.headers.get("content-length") || "0", 10);
-    if (contentLength > MAX_BODY_BYTES) {
+
+    // Measure actual bytes — content-length is client-asserted and omittable.
+    const rawBody = await request.arrayBuffer();
+    if (rawBody.byteLength > MAX_BODY_BYTES) {
       return err(413, "request_too_large", "request body too large for the trial service");
     }
-
-    const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-    const date = today();
-    const deviceKey = `d:${device}:${date}`;
-    const ipKey = `i:${ip}:${date}`;
-    const spendKey = `spend:${date}`;
-
-    const [deviceCount, ipCount, spentRaw] = await Promise.all([
-      env.TRIAL_KV.get(deviceKey),
-      env.TRIAL_KV.get(ipKey),
-      env.TRIAL_KV.get(spendKey),
-    ]);
-    if (parseFloat(spentRaw || "0") >= LIMITS.globalDailyUsd) {
-      return err(429, "rate_limit_error", QUOTA_MSG);
-    }
-    if (
-      parseInt(deviceCount || "0", 10) >= LIMITS.perDeviceDaily ||
-      parseInt(ipCount || "0", 10) >= LIMITS.perIpDaily
-    ) {
-      return err(429, "rate_limit_error", QUOTA_MSG);
-    }
-
     let body;
     try {
-      body = await request.json();
+      body = JSON.parse(new TextDecoder().decode(rawBody));
     } catch {
       return err(400, "invalid_request_error", "body must be JSON");
     }
@@ -102,47 +129,107 @@ export default {
     if (body.stream) {
       return err(400, "invalid_request_error", "streaming is not available on the trial service");
     }
+    // The app never uses prompt caching; a hand-crafted caching request would
+    // bill at premium rates the accounting shouldn't have to model.
+    if (JSON.stringify(body).includes('"cache_control"')) {
+      return err(400, "invalid_request_error", "cache_control is not available on the trial service");
+    }
     body.max_tokens = Math.min(body.max_tokens ?? MAX_TOKENS_CAP, MAX_TOKENS_CAP);
 
-    const upstream = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": env.ANTHROPIC_API_KEY,
-        "anthropic-version": request.headers.get("anthropic-version") || "2023-06-01",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-    // Bounded by max_tokens cap, so buffering the JSON is fine here.
-    const data = await upstream.json();
+    const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+    const date = today();
+    const deviceKey = `d:${device}:${date}`;
+    const ipKey = `i:${ip}:${date}`;
+    const spendKey = `spend:${date}`;
 
-    if (upstream.ok && data.usage) {
-      ctx.waitUntil(
-        recordUsage(env, { deviceKey, ipKey, spendKey, model: body.model, usage: data.usage }),
-      );
+    const [kvDevice, kvIp, kvSpend] = await Promise.all([
+      env.TRIAL_KV.get(deviceKey),
+      env.TRIAL_KV.get(ipKey),
+      env.TRIAL_KV.get(spendKey),
+    ]);
+
+    // Check-and-reserve. Everything from here to the `pending` mutations is
+    // synchronous — no await — so concurrent requests in this isolate observe
+    // each other's reservations regardless of interleaving.
+    rollPending(date);
+    const effDevice = parseInt(kvDevice || "0", 10) + (pending.devices.get(device) || 0);
+    const effIp = parseInt(kvIp || "0", 10) + (pending.ips.get(ip) || 0);
+    const effSpend = parseFloat(kvSpend || "0") + pending.spend;
+    if (
+      effSpend + RESERVE_USD > LIMITS.globalDailyUsd ||
+      effDevice >= LIMITS.perDeviceDaily ||
+      effIp >= LIMITS.perIpDaily
+    ) {
+      return err(429, "rate_limit_error", QUOTA_MSG);
     }
+    pending.devices.set(device, (pending.devices.get(device) || 0) + 1);
+    pending.ips.set(ip, (pending.ips.get(ip) || 0) + 1);
+    pending.spend += RESERVE_USD;
+
+    let upstream, data;
+    try {
+      upstream = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": env.ANTHROPIC_API_KEY,
+          "anthropic-version": request.headers.get("anthropic-version") || "2023-06-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+      // Bounded by max_tokens cap, so buffering the JSON is fine here.
+      data = await upstream.json();
+    } catch (e) {
+      // Upstream unreachable/garbled: release the reservation, charge nothing.
+      pending.devices.set(device, (pending.devices.get(device) || 0) - 1);
+      pending.ips.set(ip, (pending.ips.get(ip) || 0) - 1);
+      pending.spend -= RESERVE_USD;
+      console.log(JSON.stringify({ event: "upstream_error", message: String(e) }));
+      return err(502, "api_error", "upstream request failed; try again");
+    }
+
+    const cost = upstream.ok ? requestCost(body.model, data.usage) : 0;
+    ctx.waitUntil(settle(env, { date, deviceKey, ipKey, spendKey, device, ip, cost }));
+    console.log(
+      JSON.stringify({ event: "proxied", status: upstream.status, model: body.model, cost }),
+    );
     return Response.json(data, { status: upstream.status });
   },
 };
 
-async function recordUsage(env, { deviceKey, ipKey, spendKey, model, usage }) {
-  const price = PRICES.find((p) => model.startsWith(p.prefix));
-  const cost =
-    ((usage.input_tokens || 0) * price.input + (usage.output_tokens || 0) * price.output) / 1e6;
-  const [deviceCount, ipCount, spentRaw] = await Promise.all([
-    env.TRIAL_KV.get(deviceKey),
-    env.TRIAL_KV.get(ipKey),
-    env.TRIAL_KV.get(spendKey),
-  ]);
-  await Promise.all([
-    env.TRIAL_KV.put(deviceKey, String(parseInt(deviceCount || "0", 10) + 1), {
-      expirationTtl: COUNTER_TTL_S,
-    }),
-    env.TRIAL_KV.put(ipKey, String(parseInt(ipCount || "0", 10) + 1), {
-      expirationTtl: COUNTER_TTL_S,
-    }),
-    env.TRIAL_KV.put(spendKey, String(parseFloat(spentRaw || "0") + cost), {
-      expirationTtl: COUNTER_TTL_S,
-    }),
-  ]);
+/** Persist the outcome to KV and release the in-memory reservation.
+
+Request COUNTS persist regardless of upstream outcome — otherwise a request
+shaped to 400 upstream would never consume quota and could spam the owner's
+key for free. SPEND persists only for successful calls (cost is 0 otherwise).
+Fresh read-modify-write per key: a small cross-isolate race window remains,
+but the in-memory reservation covers the in-flight window that actually
+mattered (seconds of upstream latency). */
+async function settle(env, { date, deviceKey, ipKey, spendKey, device, ip, cost }) {
+  try {
+    const [kvDevice, kvIp, kvSpend] = await Promise.all([
+      env.TRIAL_KV.get(deviceKey),
+      env.TRIAL_KV.get(ipKey),
+      env.TRIAL_KV.get(spendKey),
+    ]);
+    await Promise.all([
+      env.TRIAL_KV.put(deviceKey, String(parseInt(kvDevice || "0", 10) + 1), {
+        expirationTtl: COUNTER_TTL_S,
+      }),
+      env.TRIAL_KV.put(ipKey, String(parseInt(kvIp || "0", 10) + 1), {
+        expirationTtl: COUNTER_TTL_S,
+      }),
+      env.TRIAL_KV.put(spendKey, String(parseFloat(kvSpend || "0") + cost), {
+        expirationTtl: COUNTER_TTL_S,
+      }),
+    ]);
+  } finally {
+    // Release the reservation only after KV reflects the outcome (or the day
+    // rolled, in which case rollPending already wiped it).
+    if (pending.date === date) {
+      pending.devices.set(device, Math.max(0, (pending.devices.get(device) || 0) - 1));
+      pending.ips.set(ip, Math.max(0, (pending.ips.get(ip) || 0) - 1));
+      pending.spend = Math.max(0, pending.spend - RESERVE_USD);
+    }
+  }
 }

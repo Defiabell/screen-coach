@@ -75,7 +75,7 @@ survive rebuilds — see the note below for why that isn't automatic.
 
     .venv/bin/python -m pytest tests/ -q
 
-106 tests, no GUI or API key required: the geometry, clamping, coordinate
+All tests run without a GUI or an API key: the geometry, clamping, coordinate
 conversion, capture ordering, Keychain timeouts and mode dispatch are all
 covered as pure logic. Window rendering and real mouse dragging are verified by
 hand.
