@@ -60,3 +60,27 @@ def test_set_key_propagates_real_write_errors(monkeypatch):
     monkeypatch.setattr(keychain, "_write", _boom)
     with pytest.raises(RuntimeError, match="-25299"):
         keychain.set_key("sk-ant-whatever")
+
+
+def test_stored_key_is_silently_readable_by_security_cli():
+    """Regression: the SecItem-based implementation created items whose
+    partition list was pinned to the creating binary's cdhash, so any other
+    reader (a rebuilt app, this CLI) blocked on a confirmation dialog instead
+    of reading. The security-CLI path must produce an item the security tool
+    itself reads back instantly and silently."""
+    import subprocess
+
+    keychain.set_key("sk-ant-partition-check")
+    out = subprocess.run(
+        ["/usr/bin/security", "find-generic-password",
+         "-s", keychain.SERVICE, "-a", keychain.ACCOUNT, "-w"],
+        capture_output=True, text=True, timeout=5,
+    )
+    assert out.returncode == 0
+    assert out.stdout.strip() == "sk-ant-partition-check"
+
+
+def test_set_key_rejects_values_that_cannot_be_stored_faithfully():
+    for bad in ('with space', 'quote"inside', 'back\\slash', '换行\n'):
+        with pytest.raises(RuntimeError, match="非法字符"):
+            keychain.set_key(bad)
