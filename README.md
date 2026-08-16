@@ -6,6 +6,9 @@ Mac menu-bar tool: pick an English sentence on screen → Claude breaks it down
 (translation, 拆句, 生词, 用法) in a floating window with pronunciation playback
 and a history list.
 
+**Try it online first** → https://screen-coach-trial.defiabell.workers.dev
+(no install, no key: paste a screenshot or type a sentence, free within the trial quota.)
+
 ## Two ways to grab the text
 
 - **A persistent region** — leave a thin framing rectangle over the area you

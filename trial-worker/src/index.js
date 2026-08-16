@@ -43,6 +43,8 @@ const MAX_TOKENS_CAP = 4096; // config.MAX_TOKENS in the app; nothing needs more
 const MAX_BODY_BYTES = 8 * 1024 * 1024; // screenshot payloads are ~1-3MB
 const COUNTER_TTL_S = 2 * 24 * 3600;
 
+import { renderPage } from "./page.js";
+
 const QUOTA_MSG =
   "今日体验额度已用完。想继续使用：菜单 → Set API Key… 填入你自己的 Anthropic API key（走官方直连，不再经过体验服务器）。";
 
@@ -99,17 +101,8 @@ export default {
       const spent = parseFloat((await env.TRIAL_KV.get(`spend:${date}`)) || "0");
       const spentUsd = Math.round(spent * 10000) / 10000;
       if ((request.headers.get("accept") || "").includes("text/html")) {
-        const pct = Math.min(100, Math.round((spentUsd / LIMITS.globalDailyUsd) * 100));
         return new Response(
-          `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>screen-coach 体验服务</title>
-<body style="font-family:system-ui;max-width:34em;margin:8vh auto;padding:0 1em;line-height:1.7">
-<h1 style="font-size:1.3em">📖 screen-coach 体验服务</h1>
-<p>状态：<b style="color:#2a7">运行中</b>（这个地址是给 app 用的接口，不是网页应用）。</p>
-<p>今日（${date}，UTC）已用额度：<b>$${spentUsd}</b> / $${LIMITS.globalDailyUsd}</p>
-<div style="background:#eee;border-radius:6px;height:10px"><div style="background:#2a7;border-radius:6px;height:10px;width:${pct}%"></div></div>
-<p style="color:#777;font-size:0.9em">下载 app：<a href="https://github.com/Defiabell/screen-coach">github.com/Defiabell/screen-coach</a></p>
-</body>`,
+          renderPage({ date, spentUsd, budgetUsd: LIMITS.globalDailyUsd }),
           { headers: { "content-type": "text/html; charset=utf-8" } },
         );
       }
