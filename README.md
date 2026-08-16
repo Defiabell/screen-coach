@@ -15,13 +15,15 @@ Nothing to install and no API key needed — open
 [screen-coach-trial.defiabell.workers.dev](https://screen-coach-trial.defiabell.workers.dev)
 and use it right away. Four ways in:
 
-1. **System screenshot + paste (recommended)** — press macOS's built-in
-   ⇧⌃⌘4 to select any screen region (goes to the clipboard), switch to the
-   page and hit ⌘V; the analysis runs automatically.
-2. **In-page screen grab** — click "📸 截取屏幕", grant the browser's
-   screen-share prompt, drag-select the part to analyze; runs automatically.
-3. **Drag in / pick an image file.**
-4. **Type an English sentence** and press Enter.
+1. **System screenshot → switch back (recommended)** — press macOS's
+   built-in ⇧⌃⌘4 to select any screen region (Windows: Win+Shift+S), then
+   switch back to the page: it **reads the clipboard and analyzes
+   automatically** (one-time clipboard permission; Safari doesn't allow the
+   auto-read — just hit ⌘V there).
+2. **⌘V paste / drag in / pick an image file.**
+3. **Type an English sentence** and press Enter.
+4. Fallback: in-page screen grab (browser screen-share API; clunkier, not
+   recommended).
 
 Results match the app: Chinese translation plus word cards (IPA, meaning in
 this sentence, common other meanings); tick 完整解析 for sentence structure,

@@ -35,14 +35,19 @@ export function renderPage({ date, spentUsd, budgetUsd }) {
 </style>
 <body>
 <h1>📖 screen-coach 在线试用</h1>
-<p>框选屏幕即时解析英文的 Mac 菜单栏工具。网页版这样用：<b>按 ⇧⌃⌘4 框选屏幕（截图进剪贴板）→ 回到本页 ⌘V</b>，松手即自动解析；或点下面的「截取屏幕」在页面里框选。完整体验（真·全局快捷键、常驻取词框）请
-<a href="https://github.com/Defiabell/screen-coach">下载 app</a>。</p>
+<p>框选屏幕即时解析英文的 Mac 菜单栏工具。完整体验（真·全局快捷键、常驻取词框）请
+<a href="https://github.com/Defiabell/screen-coach">下载 app</a>；网页版这样用：</p>
 
-<p style="text-align:center">
-  <button id="shot" type="button">📸 截取屏幕</button>
-  <button id="pick" type="button" style="background:#888">📁 选择图片</button>
+<ol style="background:#f6f8f7;border-radius:10px;padding:0.9em 1.2em 0.9em 2.4em;margin:0.8em 0">
+  <li>按 <b>⇧⌃⌘4</b> 框选屏幕上的英文（Windows：<b>Win+Shift+S</b>），截图自动进剪贴板；</li>
+  <li>切回本页 —— <b>自动读取剪贴板并解析</b>（首次浏览器会请求剪贴板权限；没弹或用 Safari 就按 <b>⌘V</b>）；</li>
+  <li>秒出翻译和生词卡。</li>
+</ol>
+
+<div class="drop" id="drop">或：⌘V 粘贴 / 拖拽图片到这里 / 点击选择文件</div>
+<p style="text-align:center;margin:0.4em 0">
+  <button id="shot" type="button" style="background:#aaa;font-size:0.85em;padding:0.3em 0.9em">备用：页面内截屏</button>
 </p>
-<div class="drop" id="drop">或直接 ⌘V 粘贴截图 / 拖拽图片到这里</div>
 <input type="file" id="file" accept="image/*" hidden>
 <div id="cropWrap" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:9;cursor:crosshair;overflow:auto;text-align:center">
   <p style="color:#fff;margin:0.6em">在截图上拖拽框选要解析的区域（Esc 取消）</p>
@@ -76,7 +81,6 @@ var goBtn = document.getElementById("go");
 var result = document.getElementById("result");
 
 drop.addEventListener("click", function () { fileInput.click(); });
-document.getElementById("pick").addEventListener("click", function () { fileInput.click(); });
 fileInput.addEventListener("change", function () { if (fileInput.files[0]) loadImage(fileInput.files[0]); });
 document.addEventListener("paste", function (e) {
   var items = e.clipboardData && e.clipboardData.items;
@@ -85,6 +89,29 @@ document.addEventListener("paste", function (e) {
     if (items[i].type.indexOf("image/") === 0) { loadImage(items[i].getAsFile()); e.preventDefault(); return; }
   }
 });
+
+// The hero flow: screenshot with the OS hotkey, switch back to this tab, and
+// the page pulls the image straight off the clipboard — no ⌘V needed.
+// Reads IMAGES only (never clipboard text — that could be anything private).
+// Safari blocks clipboard.read() outside a user gesture; the catch below
+// degrades silently and ⌘V remains the fallback.
+var lastClipSize = 0;
+function tryClipboard() {
+  if (!(navigator.clipboard && navigator.clipboard.read) || goBtn.disabled) return;
+  navigator.clipboard.read().then(function (items) {
+    for (var i = 0; i < items.length; i++) {
+      var type = items[i].types.filter(function (t) { return t.indexOf("image/") === 0; })[0];
+      if (type) {
+        return items[i].getType(type).then(function (blob) {
+          if (blob.size === lastClipSize) return; // same screenshot as last focus
+          lastClipSize = blob.size;
+          loadImage(blob);
+        });
+      }
+    }
+  }).catch(function () { /* no permission / Safari: paste still works */ });
+}
+window.addEventListener("focus", tryClipboard);
 
 // In-page screen grab: getDisplayMedia one frame → drag-select crop → analyze.
 var shotBtn = document.getElementById("shot");
