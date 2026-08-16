@@ -55,10 +55,13 @@ and launches it. After that, launch it like any other app — Spotlight,
 Launchpad, or `/Applications`.
 
 First launch:
-1. The 📖 menu-bar icon and the floating ball appear first; a moment later a
-   window asks for your Anthropic API key — paste it and click 保存. It goes
-   into macOS Keychain (service `com.jinkun.screen-coach`), not a file, so you
-   only enter it once.
+1. The 📖 menu-bar icon and the floating ball appear. **No API key is needed to
+   try it**: with no key set, requests route through a small trial proxy
+   (`trial-worker/`, a Cloudflare Worker holding the author's key) with daily
+   limits — per device, per IP, and a global budget. When the quota runs out,
+   or any time you want unlimited direct access, use menu → `Set API Key…` to
+   store your own Anthropic key. It goes into macOS Keychain (service
+   `com.jinkun.screen-coach`), not a file, so you only enter it once.
 2. Trigger an analysis once; macOS will prompt for Screen Recording. Grant it,
    then quit and reopen the app.
 3. For the ⇧⌘E hotkey, grant Accessibility when prompted. Skip this if you only
@@ -72,7 +75,7 @@ survive rebuilds — see the note below for why that isn't automatic.
 
     .venv/bin/python -m pytest tests/ -q
 
-66 tests, no GUI or API key required: the geometry, clamping, coordinate
+106 tests, no GUI or API key required: the geometry, clamping, coordinate
 conversion, capture ordering, Keychain timeouts and mode dispatch are all
 covered as pure logic. Window rendering and real mouse dragging are verified by
 hand.
@@ -154,3 +157,17 @@ Hard-won, all of them observed rather than theorised:
 - Runtime state (`history.jsonl`, `region.json`, `ball.json`, `prefs.json`) is
   under `~/Library/Application Support/Screen Coach/`. A debug log is at
   `~/Library/Logs/screen-coach-debug.log`.
+
+## Trial proxy (for forks)
+
+`trial-worker/` is a Cloudflare Worker that lets keyless installs work out of
+the box using the deployer's API key, within limits (20/device/day,
+40/IP/day, $1/day global — all constants in `src/index.js`). To run your own:
+
+    cd trial-worker
+    wrangler kv namespace create TRIAL_KV     # put the id into wrangler.jsonc
+    wrangler deploy
+    wrangler secret put ANTHROPIC_API_KEY     # paste your key
+
+Then point `TRIAL_BASE_URL` in `config.py` at your worker URL. `GET /` on the
+worker shows the day's aggregate spend.

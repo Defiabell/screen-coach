@@ -36,6 +36,11 @@ SPEAK_WPM_SLOW = 105               # the 🐢 button
 
 KEYCHAIN_TIMEOUT = 5.0             # seconds; see load_api_key()
 
+# Trial mode: with no API key set, requests route through this proxy, which
+# holds the owner's key server-side and enforces per-device/per-IP/global
+# daily limits (see trial-worker/). Lets a fresh download work with zero setup.
+TRIAL_BASE_URL = "https://screen-coach-trial.defiabell.workers.dev"
+
 
 def load_api_key() -> None:
     """Populate ANTHROPIC_API_KEY from Keychain when it's not already in the

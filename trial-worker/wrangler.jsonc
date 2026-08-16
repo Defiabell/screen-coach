@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "screen-coach-trial",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-16",
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "kv_namespaces": [
+    // Created with: wrangler kv namespace create TRIAL_KV
+    { "binding": "TRIAL_KV", "id": "8448ae43ad1d4492ba63f738701a2329" }
+  ]
+  // Secret (never in this file): wrangler secret put ANTHROPIC_API_KEY
+}

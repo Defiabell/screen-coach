@@ -428,3 +428,51 @@ def test_set_hotkey_persists_and_takes_effect_immediately(monkeypatch):
     app._set_hotkey(binding)
     assert saved == {"hotkey": binding}
     assert app._current_hotkey() == binding
+
+
+# --- trial mode: keyless installs route through the trial proxy --------------
+
+def test_get_client_without_key_uses_trial_proxy(monkeypatch):
+    import config
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(app, "_client", None)
+    monkeypatch.setattr(
+        app, "_load_prefs",
+        lambda: {"trial_device": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+    )
+    client = app._get_client()
+    assert str(client.base_url).rstrip("/") == config.TRIAL_BASE_URL.rstrip("/")
+    assert client.default_headers["x-trial-device"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+
+def test_get_client_with_key_pins_official_api(monkeypatch):
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-own-key")
+    monkeypatch.setattr(app, "_client", None)
+    client = app._get_client()
+    assert "api.anthropic.com" in str(client.base_url)
+    assert client.api_key == "sk-ant-own-key"
+
+
+def test_device_id_created_once_then_reused(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(app, "_save_pref", lambda k, v: saved.update({k: v}))
+    monkeypatch.setattr(app, "_load_prefs", lambda: dict(saved))
+    first = app._device_id()
+    second = app._device_id()
+    assert first == second == saved["trial_device"]
+    assert len(first) == 36  # uuid4 canonical form
+
+
+def test_setting_api_key_resets_cached_client(monkeypatch):
+    """Entering a key mid-session must evict the cached trial client, or the
+    user keeps burning trial quota despite having their own key."""
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(app, "_client", object())  # pretend a trial client is cached
+    monkeypatch.setattr(app.keychain, "set_key", lambda v: None)
+    monkeypatch.setattr(app, "_ask_for_key", lambda existing=False: "sk-ant-real")
+    app._prompt_for_api_key()
+    assert os.environ["ANTHROPIC_API_KEY"] == "sk-ant-real"
+    assert app._client is None

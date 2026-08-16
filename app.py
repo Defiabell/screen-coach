@@ -37,17 +37,38 @@ _hotkey_binding: dict | None = None   # active binding; None = not loaded from p
 _recorder = None                      # (panel, monitor-holder) while Set Hotkey… is open
 
 
+def _device_id() -> str:
+    """Stable anonymous UUID identifying this install for trial-mode rate
+    limiting. Created on first use and persisted in prefs.json — it carries no
+    user information; the trial proxy only counts requests per device."""
+    device = _load_prefs().get("trial_device")
+    if not device:
+        import uuid
+
+        device = str(uuid.uuid4())
+        _save_pref("trial_device", device)
+    return device
+
+
 def _get_client():
     global _client
     if _client is None:
         key = os.environ.get("ANTHROPIC_API_KEY")
-        if not key:
-            raise RuntimeError("ANTHROPIC_API_KEY is not set")
-        # Pin the official API explicitly. anthropic.Anthropic() otherwise honours
-        # ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN from the environment, so a
-        # launch from a shell that points at an internal gateway would silently
-        # route there — and reject config.MODEL, which is an official model id.
-        _client = anthropic.Anthropic(api_key=key, base_url="https://api.anthropic.com")
+        # Pin base_url explicitly in BOTH modes. anthropic.Anthropic() otherwise
+        # honours ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN from the environment,
+        # so a launch from a shell that points at an internal gateway would
+        # silently route there — and reject config.MODEL, an official model id.
+        if key:
+            _client = anthropic.Anthropic(api_key=key, base_url="https://api.anthropic.com")
+        else:
+            # Trial mode: no key needed — the proxy holds the owner's key and
+            # enforces daily limits. The api_key value is a placeholder the
+            # proxy never reads; the SDK just requires one.
+            _client = anthropic.Anthropic(
+                api_key="trial-mode",
+                base_url=config.TRIAL_BASE_URL,
+                default_headers={"x-trial-device": _device_id()},
+            )
     return _client
 
 
@@ -132,12 +153,20 @@ def _run_analysis(grab=None) -> None:
         analysis["ts"] = datetime.now().isoformat(timespec="seconds")
         history.append_entry(config.HISTORY_PATH, analysis)
         _show(render.render_html(analysis, history.load_recent(config.HISTORY_PATH)))
+    except anthropic.RateLimitError as exc:
+        # In trial mode this is the proxy's quota message (per-device or global
+        # daily cap); official-API 429s read fine through the same path.
+        try:
+            detail = exc.body["error"]["message"]
+        except Exception:  # noqa: BLE001 - any shape surprise falls back to str
+            detail = str(exc)
+        _show_error("额度已用完", detail, "菜单 → Set API Key… 填入自己的 key 即可直连官方、不限量")
     except anthropic.AuthenticationError:
         try:
-            keychain.delete_key()  # clear the bad key so the next launch re-prompts instead of reusing it
+            keychain.delete_key()  # clear the bad key so the next analysis doesn't reuse it
         except Exception:
             pass  # a cleanup failure here shouldn't hide the auth error being reported below
-        _show_error("API key 无效", "ANTHROPIC_API_KEY 被拒绝", "Keychain 里的 key 可能不对，重新打开 Screen Coach 会再次询问")
+        _show_error("API key 无效", "ANTHROPIC_API_KEY 被拒绝", "菜单 → Set API Key… 重新输入")
     except Exception as exc:  # noqa: BLE001 - surface any failure in the window (reliable UI)
         traceback.print_exc()  # full trace to console for post-mortem
         _show_error(type(exc).__name__, str(exc), "确认 Keychain 里存了 ANTHROPIC_API_KEY（首次启动的弹窗会存）")
@@ -623,10 +652,11 @@ def _start_hotkey() -> None:
             break
         _debug_log(f"CGEventTapCreate({mode}) returned NULL")
     if not tap:
-        _debug_log(
-            "no event tap available — grant Accessibility (and, for listen-only, "
-            "Input Monitoring); hotkey disabled"
-        )
+        # Measured 2026-08-16 on macOS 15 (Darwin 24.6): a FRESH Accessibility
+        # grant (trusted=True) no longer satisfies keyboard tap creation in
+        # either flavor — Input Monitoring is what gates it now. Ask for it.
+        _debug_log("no event tap available — requesting Input Monitoring")
+        _request_input_monitoring()
         return
     tap_holder.append(tap)
     source = CFMachPortCreateRunLoopSource(None, tap, 0)
@@ -636,6 +666,32 @@ def _start_hotkey() -> None:
     # the tap stops delivering events.
     _hotkey_monitor = (tap, source, _callback)
     _debug_log(f"CGEventTap installed on main run loop: {tap!r}")
+
+
+def _request_input_monitoring() -> None:
+    """Surface the system's Input Monitoring prompt via IOHIDRequestAccess.
+
+    ctypes, not pyobjc: there is no pyobjc-framework-IOKit. The prompt only
+    fires while the TCC state is "unknown" (first ask); once the user has
+    denied, macOS stays silent and the only path is System Settings → Privacy
+    & Security → Input Monitoring, which the log line spells out for that case.
+    """
+    try:
+        import ctypes
+
+        iokit = ctypes.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
+        listen = 1  # kIOHIDRequestTypeListenEvent
+        state = iokit.IOHIDCheckAccess(listen)
+        _debug_log(f"IOHIDCheckAccess(listen)={state} (0=granted 1=denied 2=unknown)")
+        if state != 0:
+            granted = iokit.IOHIDRequestAccess(listen)
+            _debug_log(
+                f"IOHIDRequestAccess(listen) -> {bool(granted)}; if no prompt "
+                "appeared, enable Screen Coach under System Settings → Privacy "
+                "& Security → Input Monitoring, then relaunch"
+            )
+    except Exception:  # noqa: BLE001 - a failed permission ask must not kill startup
+        _debug_log(f"input-monitoring request failed: {traceback.format_exc()}")
 
 
 def _record_hotkey(on_set) -> None:
@@ -807,6 +863,7 @@ def _set_api_key() -> None:
 
 
 def _prompt_for_api_key(existing: bool = False) -> None:
+    global _client
     try:
         key = _ask_for_key(existing=existing)
     except Exception:  # noqa: BLE001 - a broken dialog must not kill the app
@@ -819,9 +876,12 @@ def _prompt_for_api_key(existing: bool = False) -> None:
         keychain.set_key(key)
     except Exception as exc:
         traceback.print_exc()
-        _show_error("Keychain 写入失败", str(exc), "重新打开 Screen Coach 会再次询问 API key")
+        _show_error("Keychain 写入失败", str(exc), "菜单 → Set API Key… 可随时重试")
         return
     os.environ["ANTHROPIC_API_KEY"] = key
+    # Evict any cached client (possibly the trial one) so the next analysis
+    # goes straight to the official API with the new key.
+    _client = None
     _debug_log("API key stored")
 
 
@@ -829,26 +889,10 @@ def main() -> None:
     config.load_api_key()  # env > Keychain
     atexit.register(_kill_viewer)  # belt-and-suspenders if the app exits another way
     _start_hotkey()
-    # Ask for a missing key AFTER the menu bar is up, not before. Prompting here
-    # used to be the first thing main() did, so anything that stalled the dialog
-    # — a wedged Keychain, an unrendered modal in an LSUIElement app — took the
-    # whole app down with it: no icon, no ball, no hotkey, nothing to click.
-    # Scheduled on the run loop so it fires once rumps has finished starting.
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        _schedule_api_key_prompt()
+    # No startup key prompt anymore: a keyless install runs in trial mode
+    # through the proxy (see _get_client), so the app works out of the box.
+    # Users add their own key any time via 菜单 → Set API Key….
     ScreenCoach().run()
-
-
-def _schedule_api_key_prompt(delay: float = 1.0) -> None:
-    """Run _prompt_for_api_key on the main run loop, shortly after startup."""
-    try:
-        from Foundation import NSTimer
-
-        NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
-            delay, False, lambda _t: _prompt_for_api_key()
-        )
-    except Exception:  # noqa: BLE001 - worst case the user gets the error card instead
-        traceback.print_exc()
 
 
 if __name__ == "__main__":
