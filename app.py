@@ -680,6 +680,10 @@ def _request_input_monitoring() -> None:
         import ctypes
 
         iokit = ctypes.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
+        # IOHIDRequestAccess returns a C bool, which only defines the low
+        # byte; the default c_int restype could read garbage in the upper bits.
+        # (IOHIDCheckAccess returns IOHIDAccessType, a real int — default is fine.)
+        iokit.IOHIDRequestAccess.restype = ctypes.c_bool
         listen = 1  # kIOHIDRequestTypeListenEvent
         state = iokit.IOHIDCheckAccess(listen)
         _debug_log(f"IOHIDCheckAccess(listen)={state} (0=granted 1=denied 2=unknown)")

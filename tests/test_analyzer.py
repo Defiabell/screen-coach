@@ -112,3 +112,38 @@ def test_word_schemas_carry_other_meanings():
     # quick mode keeps its latency budget by capping the word list
     assert "5" in analyzer.TRANSLATE_PROMPT
     assert "other_meanings" in analyzer.SYSTEM_PROMPT
+
+
+def _quick_client_returning(text):
+    class FakeBlock:
+        type = "text"
+
+    FakeBlock.text = text
+
+    class FakeResp:
+        content = [FakeBlock()]
+
+    class FakeClient:
+        class messages:
+            @staticmethod
+            def create(**kw):
+                return FakeResp()
+
+    return FakeClient()
+
+
+def test_translate_image_downgrades_plain_text_reply_to_translation():
+    """A reply that ignores the schema entirely (bare prose) must become the
+    translation, not an error."""
+    out = analyzer.translate_image(_quick_client_returning("委员会讨论了提案。"), "Zm9v")
+    assert out["translation"] == "委员会讨论了提案。"
+    assert out["words"] == []
+
+
+def test_translate_image_downgrades_non_dict_json_reply():
+    """Valid JSON that isn't an object (a quoted string, a list, null) must
+    also downgrade instead of raising AttributeError on .get()."""
+    for text in ('"just a translation"', "[1, 2]", "null"):
+        out = analyzer.translate_image(_quick_client_returning(text), "Zm9v")
+        assert out["translation"] == text
+        assert out["words"] == []

@@ -29,6 +29,9 @@ ANALYSIS_SCHEMA = {
         "translation": {"type": "string"},
         "breakdown": {"type": "string"},
         "words": {
+            # Word-count caps live in the prompts only: the structured-outputs
+            # API rejects maxItems ("For 'array' type, property 'maxItems' is
+            # not supported" — verified live 2026-08-16).
             "type": "array",
             "items": {
                 "type": "object",
@@ -115,8 +118,11 @@ def translate_image(client, image_b64: str, model: str = config.QUICK_MODEL) -> 
     try:
         data = json.loads(text)
     except ValueError:
-        # A malformed reply downgrades to translation-only rather than erroring:
-        # the raw text is more likely a bare translation than garbage.
+        data = None
+    if not isinstance(data, dict):
+        # Any off-schema reply — broken JSON, a bare quoted string, a list —
+        # downgrades to translation-only rather than erroring: the raw text is
+        # more likely a bare translation than garbage.
         data = {"translation": text}
     return {
         "sentence": "",
